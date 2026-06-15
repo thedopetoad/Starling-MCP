@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "starling": {
+      "command": "npx",
+      "args": ["-y", "@starling/execution-mcp@1.0.0"],
+      "env": {
+        "STARLING_KEYSTORE_DIR": "~/.starling/keystore",
+        "STARLING_UNLOCK_MODE": "keychain",
+        "STARLING_NETWORK": "testnet",
+        "STARLING_SIGNER_BACKEND": "local",
+        "STARLING_KEY": "sk_live_REPLACE_ME_analytics_only"
+      }
+    }
+  }
+}

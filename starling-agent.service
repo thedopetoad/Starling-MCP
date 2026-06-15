@@ -1,0 +1,29 @@
+# starling-agent.service — unattended-restart-safe TPM unlock (systemd v256+).
+# Seal the passphrase once:
+#   systemd-creds encrypt --name=starling_passphrase pass.txt /etc/starling/passphrase.cred
+# then `rm pass.txt`. Restart=on-failure keeps the bot alive across crashes;
+# LoadCredentialEncrypted re-delivers the TPM2-sealed passphrase on every restart
+# with no human — and it resists disk-theft/VM-clone, unlike an EnvironmentFile.
+[Unit]
+Description=Starling execution MCP agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/npx -y @starling/execution-mcp@1.0.0 serve
+Environment=STARLING_UNLOCK_MODE=tpm
+Environment=STARLING_NETWORK=mainnet
+LoadCredentialEncrypted=starling_passphrase:/etc/starling/passphrase.cred
+Restart=on-failure
+RestartSec=5
+# Hardening: keep secrets out of core dumps and the world.
+LimitCORE=0
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.starling
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

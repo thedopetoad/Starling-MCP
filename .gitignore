@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# NEVER commit keys or passphrases
+/.starling/
+.starling/
+*.keystore.json
+.env
+.env.*
+!.env.example
