@@ -4,6 +4,7 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { starlingDir, keystoreDir } from "./keystore/store.js";
 import { CHAINS } from "./keystore/format.js";
+import { resolveKeySource } from "./keysource/index.js";
 
 type Level = "PASS" | "WARN" | "FAIL";
 const isWin = process.platform === "win32";
@@ -21,33 +22,47 @@ export async function run(): Promise<void> {
   if (Buffer.compare(randomBytes(32), randomBytes(32)) !== 0) line("PASS", "CSPRNG ok");
   else (line("FAIL", "randomBytes returned identical buffers"), fail++);
 
-  let any = false;
-  for (const chain of CHAINS) {
-    const p = path.join(keystoreDir(), `${chain}.keystore.json`);
-    try {
-      const st = await fs.stat(p);
-      any = true;
-      if (!isWin && (st.mode & 0o077) !== 0) (line("FAIL", `${chain}.keystore.json group/world-readable (chmod 600)`), fail++);
-      else line("PASS", `${chain} keystore present`);
-    } catch {
-      /* venue not configured */
+  // Which key source will the server sign from?
+  const source = await resolveKeySource().catch((e) => {
+    line("FAIL", `key source: ${(e as Error).message}`);
+    fail++;
+    return null;
+  });
+  const onMainnet = (process.env.STARLING_NETWORK ?? "testnet") === "mainnet";
+  if (!source) {
+    line("WARN", "no key source available — set STARLING_PK_* or run 'agent-wallet init'");
+  } else {
+    line(source.plaintext && onMainnet ? "WARN" : "PASS", `key source: ${source.describe()}`);
+    if (source.plaintext && onMainnet) {
+      line("WARN", "plaintext keys on mainnet — graduate to the encrypted keystore (agent-wallet init)");
+    }
+    // keystore source: keep the keystore-file hygiene + unlock checks
+    if (source.id === "keystore") {
+      for (const chain of CHAINS) {
+        const p = path.join(keystoreDir(), `${chain}.keystore.json`);
+        try {
+          const st = await fs.stat(p);
+          if (!isWin && (st.mode & 0o077) !== 0)
+            (line("FAIL", `${chain}.keystore.json group/world-readable (chmod 600)`), fail++);
+          else line("PASS", `${chain} keystore present`);
+        } catch {
+          /* venue not configured */
+        }
+      }
+      const mode = process.env.STARLING_UNLOCK_MODE ?? "keychain";
+      if (mode === "env" && !process.env.STARLING_KEYSTORE_PASSPHRASE)
+        (line("FAIL", "unlock=env but STARLING_KEYSTORE_PASSPHRASE unset"), fail++);
+      else if (onMainnet && mode === "file")
+        (line("FAIL", "mainnet + plaintext file unlock is forbidden — use tpm|kms|env"), fail++);
+      else line("PASS", `unlock mode = ${mode}`);
     }
   }
-  if (!any) line("WARN", `no keystores in ${keystoreDir()} — run 'agent-wallet init'`);
-
-  const mode = process.env.STARLING_UNLOCK_MODE ?? "keychain";
-  if (mode === "env" && !process.env.STARLING_KEYSTORE_PASSPHRASE)
-    (line("FAIL", "unlock=env but STARLING_KEYSTORE_PASSPHRASE unset"), fail++);
-  else line("PASS", `unlock mode = ${mode}`);
 
   const leaky = Object.keys(process.env).filter((k) =>
     /^NEXT_PUBLIC_.*(KEY|SECRET|MNEMONIC|PRIV|PASSPHRASE)/i.test(k),
   );
   if (leaky.length) (line("FAIL", `NEXT_PUBLIC_ secrets in env: ${leaky.join(", ")}`), fail++);
   else line("PASS", "no NEXT_PUBLIC_ secret leak");
-
-  if ((process.env.STARLING_NETWORK ?? "testnet") === "mainnet" && mode === "file")
-    (line("FAIL", "mainnet + plaintext file unlock is forbidden — use tpm|kms|env"), fail++);
 
   void starlingDir;
   process.stdout.write(fail ? `\n${fail} FAIL\n` : "\nAll checks passed.\n");

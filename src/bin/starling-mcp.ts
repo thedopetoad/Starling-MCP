@@ -5,7 +5,7 @@
 //   starling-mcp verify     unlock the keystore and print derived addresses (JSON)
 //   starling-mcp doctor     hygiene checks
 //   starling-mcp --version | --help
-import { bootUnlock, loadedAddresses } from "../signers/index.js";
+import { bootUnlock, loadedAddresses, activeKeySource } from "../signers/index.js";
 
 const VERSION = "1.0.0";
 const HELP = `Starling execution MCP — connect your trading bot to every venue.
@@ -29,6 +29,7 @@ async function verify(): Promise<void> {
       {
         ok: true,
         network: process.env.STARLING_NETWORK ?? "testnet",
+        keySource: activeKeySource(),
         addresses: loadedAddresses(),
       },
       null,

@@ -11,7 +11,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { bootUnlock, loadedAddresses } from "./signers/index.js";
+import { bootUnlock, loadedAddresses, activeKeySource } from "./signers/index.js";
 
 const log = (m: string) => process.stderr.write(`[starling] ${m}\n`);
 const text = (obj: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(obj, null, 2) }] });
@@ -60,7 +60,7 @@ export async function startServer(): Promise<void> {
       case "auth_check":
         return text({
           network: process.env.STARLING_NETWORK ?? "testnet",
-          signerBackend: process.env.STARLING_SIGNER_BACKEND ?? "local",
+          keySource: activeKeySource(),
           unlockMode: process.env.STARLING_UNLOCK_MODE ?? "keychain",
           venues: Object.fromEntries(
             Object.entries(addrs).map(([k, v]) => [k, { signerLoaded: !!v }]),
