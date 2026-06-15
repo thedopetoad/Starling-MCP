@@ -1,0 +1,4 @@
+# Cross-platform line endings: store text as LF and check out LF everywhere, so
+# the bin shebang and the published npm package work on macOS/Linux as well as
+# Windows. (A CRLF shebang breaks `#!/usr/bin/env node` on POSIX.)
+* text=auto eol=lf
