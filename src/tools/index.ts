@@ -40,6 +40,7 @@ import type {
   OpenIntent,
   PositionState,
   Side,
+  SubmitResult,
   Venue,
 } from "../adapters/types.js";
 import type { VenueAdapter } from "../adapters/types.js";
@@ -619,17 +620,34 @@ async function handleOpenPosition(deps: ToolDeps, a: Args): Promise<ToolText> {
   // Count it toward the daily cap only on a fresh build (replays already counted).
   if (!res.replayed) deps.recordOpen(notionalUsd);
 
+  // Off-chain order books (PM CLOB / HL exchange) expose submit() — POST the
+  // locally-signed order now. Venues whose build is an on-chain tx have no
+  // submit(); they return the build for the caller to broadcast.
+  let submit: SubmitResult | undefined;
+  if (!res.replayed && res.build && adapter.submit) {
+    submit = await adapter.submit(res.build);
+    await deps.store.patch(deps.botId, intent.idempotencyKey, {
+      state: submit.posted ? "FILLED" : "FAILED",
+      txHashes: submit.txHashes ?? [],
+      error: submit.posted ? undefined : { code: "no_liquidity", message: submit.error ?? "order rejected", recoverable: true, suggestedAction: "re-quote and retry with the same idempotencyKey" },
+    });
+  }
+
   return ok({
-    ok: true,
+    ok: submit ? submit.posted : true,
     replayed: res.replayed,
-    state: res.record.state,
+    state: submit ? (submit.posted ? "FILLED" : "FAILED") : res.record.state,
     notionalUsd,
     intent: { venue, marketId: intent.marketId, side: intent.side, amount: intent.amount },
-    // The UNSIGNED artifact for the local signer. Never signed/broadcast here.
+    submit,
     build: res.build,
     note: res.replayed
-      ? "idempotencyKey already used — returning the ORIGINAL build, not a new order."
-      : "UNSIGNED build. Sign with the local key, reconcile, then broadcast.",
+      ? "idempotencyKey already used — returning the ORIGINAL result, not a new order."
+      : submit
+        ? submit.posted
+          ? "Order POSTed to the venue (locally signed, bounded by worstPrice + caps)."
+          : `Order rejected: ${submit.error}`
+        : "UNSIGNED build. Sign with the local key, then broadcast.",
   });
 }
 

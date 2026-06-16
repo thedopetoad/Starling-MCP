@@ -115,6 +115,18 @@ export interface PositionState {
   resolved?: boolean;
 }
 
+/** Outcome of submitting a built order to the venue (off-chain order POST for
+ *  PM/HL; an on-chain broadcast stays with the caller for Solana). */
+export interface SubmitResult {
+  posted: boolean;
+  orderId?: string;
+  status?: string;
+  /** on-chain settlement tx hashes if the order matched immediately. */
+  txHashes?: string[];
+  error?: string;
+  raw?: unknown;
+}
+
 /**
  * The adapter contract. Implemented by polymarket.ts / hyperliquid.ts /
  * jupiter.ts. Pure builders + reads; the signer + transport live above.
@@ -129,4 +141,11 @@ export interface VenueAdapter {
   buildOpen(intent: OpenIntent): Promise<BuildResult>;
   buildClose(intent: CloseIntent): Promise<BuildResult>;
   state(marketId: string): Promise<PositionState | null>;
+  /**
+   * Submit an already-locally-signed order to the venue. Present for off-chain
+   * order books (PM CLOB / HL exchange) where the signed order is POSTed; absent
+   * for venues whose build is an on-chain tx the caller broadcasts. Gated upstream
+   * by the risk caps and bounded by the order's own worst price.
+   */
+  submit?(build: BuildResult): Promise<SubmitResult>;
 }

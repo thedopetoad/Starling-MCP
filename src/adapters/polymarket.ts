@@ -33,8 +33,10 @@ import type {
   OpenIntent,
   CloseIntent,
   Eip712OrderResult,
+  BuildResult,
   PositionState,
   Side,
+  SubmitResult,
 } from "./types.js";
 import { getEvmSigner } from "../signers/index.js";
 import {
@@ -57,6 +59,9 @@ import {
   fetchTickSize,
   fetchNegRisk,
   fetchPositions,
+  postOrder,
+  resolveClobCredsFromEnv,
+  type ClobOrderPayload,
   type DataApiPosition,
 } from "./polymarket-transport.js";
 
@@ -202,6 +207,38 @@ export class PolymarketAdapter implements VenueAdapter {
   async state(marketId: string): Promise<PositionState | null> {
     const tokenId = stripVenuePrefix(marketId);
     return this.readPosition(tokenId);
+  }
+
+  /**
+   * POST the (already locally-signed) order to the CLOB with L2 auth, FAK
+   * (fill-and-kill: marketable up to the bounded worst price, remainder cancelled
+   * — never rests an unbounded order). Returns the orderID + any immediate
+   * settlement tx hashes. The risk caps already gated the size upstream.
+   */
+  async submit(build: BuildResult): Promise<SubmitResult> {
+    if (build.kind !== "eip712Order") {
+      return { posted: false, error: `polymarket submit expects an eip712Order build, got ${build.kind}` };
+    }
+    const creds = resolveClobCredsFromEnv();
+    if (!creds) {
+      return {
+        posted: false,
+        error:
+          "no CLOB L2 creds — set STARLING_PM_CLOB_API_KEY / _SECRET / _PASSPHRASE " +
+          "(mint them once for your EOA via createOrDeriveApiKey on polymarket.com).",
+      };
+    }
+    const address = getEvmSigner("polymarket").address;
+    const payload: ClobOrderPayload = { order: build.orderStruct, owner: creds.key, orderType: "FAK" };
+    const res = await postOrder(creds, address, payload, { host: this.clobHost, fetchImpl: this.fetchImpl });
+    return {
+      posted: res.ok,
+      orderId: res.orderID,
+      status: res.status,
+      txHashes: res.transactionHashes,
+      error: res.error,
+      raw: res.raw,
+    };
   }
 
   // ── internals ──────────────────────────────────────────────────────────

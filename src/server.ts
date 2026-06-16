@@ -14,6 +14,8 @@ import {
 import { bootUnlock, loadedAddresses, activeKeySource } from "./signers/index.js";
 import { INSTRUCTIONS } from "./instructions.js";
 import { utcDayKey, addDecimal, type RiskLimits, type DailyUsage } from "./policy/limits.js";
+import { polymarketAdapter } from "./adapters/polymarket.js";
+import type { VenueAdapter, Venue } from "./adapters/types.js";
 import {
   MONEY_TOOLS,
   MONEY_TOOL_NAMES,
@@ -98,9 +100,14 @@ function buildToolDeps(): ToolDeps {
     if (usage.dayKey !== today) usage = { dayKey: today, openedNotionalUsd: "0", realizedLossUsd: "0" };
   };
 
+  // Inject live venue adapters only when their signer is loaded. Polymarket is
+  // wired (CLOB V2, sig-0 EOA, build→sign→submit). HL/Jupiter join here next.
+  const adapters: Partial<Record<Venue, VenueAdapter>> = {};
+  if (addrs.polygon) adapters.polymarket = polymarketAdapter;
+
   return {
     botId: process.env.STARLING_BOT_ID ?? "default",
-    adapters: {}, // Phase 1 (PM) / 4 (HL) / 5 (Jupiter) inject here.
+    adapters,
     bridges: {}, // Phase 3 (CCTP + deBridge) injects here.
     store: makeIntentStore(),
     reconciler: makeReconciler(),
