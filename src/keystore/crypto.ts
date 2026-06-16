@@ -8,6 +8,7 @@ import { xchacha20poly1305 } from "@noble/ciphers/chacha";
 import { argon2id } from "@noble/hashes/argon2";
 import { randomBytes } from "node:crypto";
 import { KEYSTORE_VERSION, type Chain, type KeystoreV1 } from "./format.js";
+import { canonicalTreasuryFields } from "./treasury-seal.js";
 
 // argon2id cost. 64 MiB / t=3 / p=1 is comfortably above OWASP's 2024 minimum.
 // On a low-RAM box we fall back to the OWASP floor (19 MiB) and the caller
@@ -29,7 +30,12 @@ function canonicalAad(meta: {
   t: number;
   p: number;
   salt: string;
+  /** per-chain sweep/withdraw address bound into the AAD when present. Absent =>
+   *  legacy keystore => AAD byte-identical to the pre-treasury format (so old
+   *  keystores + the frozen test vectors still decrypt). */
+  treasury?: string;
 }): Uint8Array {
+  const tf = canonicalTreasuryFields({ chain: meta.chain, treasury: meta.treasury });
   const obj: Record<string, unknown> = {
     version: meta.version,
     chain: meta.chain,
@@ -39,6 +45,7 @@ function canonicalAad(meta: {
     p: meta.p,
     salt: meta.salt,
     cipher: "xchacha20poly1305",
+    ...(tf ?? {}), // splice {treasury} ONLY when bound — legacy stays unchanged
   };
   const sorted = Object.keys(obj)
     .sort()
@@ -77,17 +84,19 @@ export function encryptKeystore(
   chain: Chain,
   address: string,
   uuid: string,
-  opts?: { lowRam?: boolean },
+  opts?: { lowRam?: boolean; treasury?: string },
 ): EncryptResult {
   const m = opts?.lowRam ? ARGON2_FLOOR_M : ARGON2.m;
   const t = ARGON2.t;
   const p = ARGON2.p;
   const salt = randomBytes(16).toString("hex");
   const nonce = randomBytes(24); // XChaCha20 192-bit nonce — safe under random
+  // Store the NORMALIZED treasury so the displayed value == the authenticated one.
+  const treasury = canonicalTreasuryFields({ chain, treasury: opts?.treasury })?.treasury;
 
   const key = deriveKey(passphrase, salt, m, t, p);
   try {
-    const aad = canonicalAad({ version: KEYSTORE_VERSION, chain, m, t, p, salt });
+    const aad = canonicalAad({ version: KEYSTORE_VERSION, chain, m, t, p, salt, treasury });
     const ct = xchacha20poly1305(key, nonce, aad).encrypt(secret);
     return {
       loweredKdf: !!opts?.lowRam,
@@ -95,6 +104,7 @@ export function encryptKeystore(
         version: KEYSTORE_VERSION,
         chain,
         address,
+        ...(treasury ? { treasury } : {}),
         uuid,
         crypto: {
           kdf: { function: "argon2id", params: { m, t, p, salt } },
@@ -130,8 +140,9 @@ export function decryptKeystore(ks: KeystoreV1, passphrase: Uint8Array): Buffer 
   const { m, t, p, salt } = ks.crypto.kdf.params;
   const key = deriveKey(passphrase, salt, m, t, p);
   try {
-    // AAD recomputed from the file's OWN fields — this is what authenticates them.
-    const aad = canonicalAad({ version: ks.version, chain: ks.chain, m, t, p, salt });
+    // AAD recomputed from the file's OWN fields — this is what authenticates them
+    // (incl. the bound treasury, if any: a swapped treasury fails the tag).
+    const aad = canonicalAad({ version: ks.version, chain: ks.chain, m, t, p, salt, treasury: ks.treasury });
     const nonce = Buffer.from(ks.crypto.cipher.params.nonce, "hex");
     const ct = Buffer.from(ks.crypto.cipher.message, "hex");
     const pt = xchacha20poly1305(key, nonce, aad).decrypt(ct); // throws on bad tag

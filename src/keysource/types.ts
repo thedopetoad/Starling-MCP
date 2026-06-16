@@ -11,6 +11,10 @@ export interface ChainSecret {
   chain: Chain;
   /** 32-byte secp256k1 private key (EVM) or ed25519 seed (Solana). */
   secret: Buffer;
+  /** AAD-authenticated sweep/withdraw address, present only from the encrypted
+   *  keystore source (where decrypt verified it). Plaintext sources omit it, so
+   *  the withdraw guardrail refuses (treasury_not_sealed) until one is sealed. */
+  treasury?: string;
 }
 
 export interface KeySource {

@@ -25,7 +25,8 @@ export const keystoreSource: KeySource = {
       for (const chain of CHAINS) {
         const ks = await readKeystore(chain).catch(() => null);
         if (!ks) continue;
-        out.push({ chain, secret: decryptKeystore(ks, pass) });
+        // decrypt verified the AAD (incl. the bound treasury), so ks.treasury is authentic.
+        out.push({ chain, secret: decryptKeystore(ks, pass), treasury: ks.treasury });
       }
       return out;
     } finally {

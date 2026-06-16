@@ -28,6 +28,9 @@ export interface KeystoreV1 {
   chain: Chain;
   /** public address / base58 pubkey — NEVER the secret. */
   address: string;
+  /** per-chain sweep/withdraw address, bound into the AEAD AAD (tamper-evident).
+   *  Optional: legacy keystores omit it and still decrypt. */
+  treasury?: string;
   crypto: {
     kdf: {
       function: "argon2id";

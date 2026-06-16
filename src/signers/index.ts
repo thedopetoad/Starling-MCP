@@ -7,6 +7,8 @@
 import { resolveKeySource } from "../keysource/index.js";
 import { makeEvmSigner, type EvmSigner } from "./evm.js";
 import { makeSolanaSigner, type SolanaSigner } from "./solana.js";
+import type { Chain } from "../keystore/format.js";
+import type { SealedTreasury } from "../withdraw/allowlist.js";
 
 // stderr ONLY — the MCP stdio spec forbids non-JSON-RPC bytes on stdout.
 const log = (...m: unknown[]) => process.stderr.write(`[starling] ${m.join(" ")}\n`);
@@ -16,6 +18,8 @@ let sourceId = "none";
 let polygon: EvmSigner | null = null;
 let hlAgent: EvmSigner | null = null;
 let solana: SolanaSigner | null = null;
+// Per-chain sweep address recovered from the AAD-authenticated keystore at boot.
+const treasuryByChain: Partial<Record<Chain, string>> = {};
 
 export async function bootUnlock(): Promise<void> {
   if (unlocked) return;
@@ -43,10 +47,11 @@ export async function bootUnlock(): Promise<void> {
 
   const secrets = await source.load();
   try {
-    for (const { chain, secret } of secrets) {
+    for (const { chain, secret, treasury } of secrets) {
       if (chain === "polygon") polygon = makeEvmSigner(secret);
       else if (chain === "hyperliquid") hlAgent = makeEvmSigner(secret);
       else if (chain === "solana") solana = makeSolanaSigner(secret);
+      if (treasury) treasuryByChain[chain] = treasury;
     }
   } finally {
     for (const s of secrets) s.secret.fill(0); // best-effort; see threat model
@@ -73,6 +78,18 @@ export function getSolanaSigner(): SolanaSigner {
 /** The id of the key source that was used at boot ("keystore"|"env"|"file"|"none"). */
 export function activeKeySource(): string {
   return sourceId;
+}
+
+/**
+ * The sweep/withdraw treasury recovered from the keystore at boot. `sealed` is
+ * true only when it came from the AAD-authenticated keystore source — so the
+ * withdraw guardrail refuses (treasury_not_sealed) for plaintext key sources.
+ */
+export function loadedTreasury(): SealedTreasury {
+  return {
+    byChain: { ...treasuryByChain },
+    sealed: sourceId === "keystore" && Object.keys(treasuryByChain).length > 0,
+  };
 }
 
 /** Public addresses of whatever loaded — for auth_check / verify. */
