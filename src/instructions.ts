@@ -56,7 +56,10 @@ open_position checks the caps BEFORE building, so a blocked trade never signs.
 - **Hyperliquid** (perps): IOC limit orders signed as L1 actions (no gas, no
   approvals). enable_venue just says "fund the L1". Set \`STARLING_NETWORK=mainnet\`
   for real funds (defaults to testnet).
-- **Solana / Jupiter**: not wired yet.
+- **Solana / Jupiter** (spot swap): keyless Jupiter Swap API, v0 tx signed locally
+  with the ed25519 key, broadcast + confirmed via \`STARLING_SOLANA_RPC\`. marketId
+  is \`jup:<mint>\`; "buy" spends SOL for the mint, "sell" returns it to SOL.
+  worstPrice = minimum OUTPUT per INPUT (a rate floor); slippageFrac caps the fill.
 
 ## Funding & gas (NOT yet wired — fund directly for now)
 Cross-chain bridging (CCTP/deBridge) and the gas auto-top-up planners exist in the

@@ -9,3 +9,6 @@ dist/
 .env
 .env.*
 !.env.example
+
+# local-only operator utilities (machine paths; touch real wallets)
+scripts/

@@ -16,6 +16,7 @@ import { INSTRUCTIONS } from "./instructions.js";
 import { utcDayKey, addDecimal, type RiskLimits, type DailyUsage } from "./policy/limits.js";
 import { polymarketAdapter } from "./adapters/polymarket.js";
 import { hyperliquidAdapter } from "./adapters/hyperliquid.js";
+import { jupiterAdapter } from "./adapters/jupiter.js";
 import { makeRealVenueEnabler } from "./adapters/venue-enabler.js";
 import type { VenueAdapter, Venue } from "./adapters/types.js";
 import {
@@ -107,6 +108,7 @@ function buildToolDeps(): ToolDeps {
   const adapters: Partial<Record<Venue, VenueAdapter>> = {};
   if (addrs.polygon) adapters.polymarket = polymarketAdapter;
   if (addrs.hyperliquid) adapters.hyperliquid = hyperliquidAdapter;
+  if (addrs.solana) adapters.jupiter = jupiterAdapter;
 
   return {
     botId: process.env.STARLING_BOT_ID ?? "default",
