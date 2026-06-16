@@ -18,7 +18,9 @@ import { polymarketAdapter } from "./adapters/polymarket.js";
 import { hyperliquidAdapter } from "./adapters/hyperliquid.js";
 import { jupiterAdapter } from "./adapters/jupiter.js";
 import { makeRealVenueEnabler } from "./adapters/venue-enabler.js";
-import type { VenueAdapter, Venue } from "./adapters/types.js";
+import { DeBridgeBridge } from "./bridge/debridge.js";
+import type { Bridge, BridgeProvider } from "./bridge/types.js";
+import type { VenueAdapter, Venue, Chain } from "./adapters/types.js";
 import {
   MONEY_TOOLS,
   MONEY_TOOL_NAMES,
@@ -110,10 +112,24 @@ function buildToolDeps(): ToolDeps {
   if (addrs.hyperliquid) adapters.hyperliquid = hyperliquidAdapter;
   if (addrs.solana) adapters.jupiter = jupiterAdapter;
 
+  // deBridge DLN (validated SOL->Polygon build->sign->simulate). Source address is
+  // resolved per-route from the loaded signers — NEVER an agent argument. CCTP
+  // joins here once its draft is validated the same way.
+  const bridges: Partial<Record<BridgeProvider, Bridge>> = {};
+  if (addrs.solana || addrs.polygon || addrs.hyperliquid) {
+    bridges.debridge = new DeBridgeBridge({
+      sourceAddressFor: (chain: Chain) => {
+        const a = chain === "solana" ? addrs.solana : chain === "hyperliquid" ? addrs.hyperliquid : addrs.polygon;
+        if (!a) throw new Error(`no loaded signer for deBridge source chain ${chain}`);
+        return a;
+      },
+    });
+  }
+
   return {
     botId: process.env.STARLING_BOT_ID ?? "default",
     adapters,
-    bridges: {}, // Phase 3 (CCTP + deBridge) injects here.
+    bridges, // deBridge wired; CCTP joins once validated.
     store: makeIntentStore(),
     reconciler: makeReconciler(),
     treasury: loadSealedTreasury,

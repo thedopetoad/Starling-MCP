@@ -228,6 +228,24 @@ function strip0x(h: string): string {
   return h.startsWith("0x") || h.startsWith("0X") ? h.slice(2) : h;
 }
 
+/** GET with a couple of retries on TRANSPORT errors only (undici "fetch failed"
+ *  on the public DLN host is intermittent). HTTP error STATUSES are NOT retried
+ *  here — they're returned for the caller to inspect (assertOrderPins). This only
+ *  smooths connection drops; it never re-submits a money move (create-tx is a
+ *  read that builds an unsigned order — signing/sending stays with the caller). */
+async function fetchWithRetry(doFetch: typeof fetch, url: string, attempts = 3): Promise<Response> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await doFetch(url, { method: "GET", headers: { accept: "application/json" } });
+    } catch (e) {
+      lastErr = e;
+      await new Promise((r) => setTimeout(r, 400 * (i + 1)));
+    }
+  }
+  throw new Error(`deBridge create-tx transport error after ${attempts} attempts: ${(lastErr as Error)?.message}`);
+}
+
 /** Left-pad a hex value (no 0x) to 32 bytes / 64 hex chars. */
 function pad32(hexNo0x: string): string {
   const h = hexNo0x.toLowerCase();
@@ -393,9 +411,12 @@ export function buildSourceOrderTxs(
 // ---------------------------------------------------------------------------
 
 export interface DeBridgeConfig {
-  /** Source-chain EOA address (the local signer's address on the source chain).
-   *  Used as senderAddress and srcChainOrderAuthorityAddress (refund beneficiary). */
-  sourceAddress: string;
+  /** Resolve the local signer's address on a given SOURCE chain — used as
+   *  senderAddress + srcChainOrderAuthorityAddress (the refund beneficiary). A
+   *  resolver (not a fixed string) because the source chain varies per route:
+   *  a Solana-source order uses the base58 Solana address, a Polygon-source order
+   *  the EVM address. NEVER an agent argument. */
+  sourceAddressFor: (chain: Chain) => string;
   /** Optional custom fetch (tests). Defaults to global fetch. */
   fetchImpl?: typeof fetch;
 }
@@ -415,6 +436,7 @@ export class DeBridgeBridge implements Bridge {
    * the destination). Pins srcChainTokenInAmount, lets the destination auto-solve.
    */
   private fundingParams(route: BridgeRoute, amountBaseUnits: string): CreateTxParams {
+    const src = this.cfg.sourceAddressFor(route.fromChain);
     return {
       srcChainId: debridgeChainId(route.fromChain),
       srcChainTokenIn: usdcOn(route.fromChain),
@@ -424,11 +446,11 @@ export class DeBridgeBridge implements Bridge {
       dstChainTokenOutAmount: "auto",
       dstChainTokenOutRecipient: route.recipient,
       // Refund beneficiary on the source side = our source EOA.
-      srcChainOrderAuthorityAddress: this.cfg.sourceAddress,
+      srcChainOrderAuthorityAddress: src,
       // Cancel/manage authority on the destination side = the recipient (user-
       // controlled). NEVER an agent-supplied address.
       dstChainOrderAuthorityAddress: route.recipient,
-      senderAddress: this.cfg.sourceAddress,
+      senderAddress: src,
       affiliateFeePercent: 0,
     };
   }
@@ -442,10 +464,7 @@ export class DeBridgeBridge implements Bridge {
    */
   async createOrder(p: CreateTxParams): Promise<DlnCreateTxResponse> {
     const url = buildCreateTxUrl(p);
-    const r = await this.doFetch(url, {
-      method: "GET",
-      headers: { accept: "application/json" },
-    });
+    const r = await fetchWithRetry(this.doFetch, url);
     const body = (await r.json()) as DlnCreateTxResponse;
     if (!r.ok) {
       throw new Error(

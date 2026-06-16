@@ -357,7 +357,9 @@ export async function ensureGas(
   // the single verified + re-decoded (assertOrderPins) chokepoint. We need the
   // raw response to enforce the USDC source ceiling BEFORE handing out the tx.
   const bridge = new DeBridgeBridge({
-    sourceAddress: opts.sourceAddress,
+    // gas.ts already pinned the source authority inside plan.params; this resolver
+    // is only used by fundingParams (unused here) — return the known source addr.
+    sourceAddressFor: () => opts.sourceAddress,
     fetchImpl: opts.fetchImpl,
   });
   const res = await bridge.createOrder(plan.params);
