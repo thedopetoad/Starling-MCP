@@ -1,0 +1,17 @@
+{
+  "//": "Cursor: Settings -> MCP -> Add new global MCP server, OR save as .cursor/mcp.json in your project. Same schema as Claude Desktop / Claude Code.",
+  "//easy-path": "This variant uses the PLAINTEXT env key source (no keystore). Fine for testnet / small float — the server prints a loud warning. Replace the 0x... placeholders with your own keys, or delete the three STARLING_PK_* lines and set STARLING_KEY_SOURCE to \"auto\" to use an encrypted keystore created by `agent-wallet init`.",
+  "mcpServers": {
+    "starling": {
+      "command": "npx",
+      "args": ["-y", "github:thedopetoad/Starling-MCP"],
+      "env": {
+        "STARLING_KEY_SOURCE": "env",
+        "STARLING_NETWORK": "testnet",
+        "STARLING_PK_POLYGON": "0xYOUR_POLYGON_PRIVATE_KEY",
+        "STARLING_PK_HYPERLIQUID": "0xYOUR_HYPERLIQUID_PRIVATE_KEY",
+        "STARLING_PK_SOLANA": "YOUR_SOLANA_BASE58_OR_HEX_KEY"
+      }
+    }
+  }
+}

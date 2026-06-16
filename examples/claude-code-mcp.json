@@ -1,0 +1,15 @@
+{
+  "//": "Claude Code: save as .mcp.json in your project root (or merge into ~/.claude.json).",
+  "//env": "Pick ONE key source. The block below uses the encrypted keystore from `agent-wallet init` (recommended). To paste a plaintext key instead, see the commented `env`-source variant under examples/cursor-mcp.json — it works identically here.",
+  "mcpServers": {
+    "starling": {
+      "command": "npx",
+      "args": ["-y", "github:thedopetoad/Starling-MCP"],
+      "env": {
+        "STARLING_KEY_SOURCE": "auto",
+        "STARLING_NETWORK": "testnet",
+        "STARLING_UNLOCK_MODE": "keychain"
+      }
+    }
+  }
+}
