@@ -19,7 +19,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "prepare": "npm run build",
-    "test": "npm run build && node --test dist/keystore/crypto.test.js dist/keystore/vectors.test.js",
+    "test": "npm run build && node --test \"dist/**/*.test.js\"",
     "serve": "npm run build && node dist/bin/starling-mcp.js serve",
     "doctor": "npm run build && node dist/bin/starling-mcp.js doctor"
   },
