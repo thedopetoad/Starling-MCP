@@ -88,6 +88,13 @@ export interface HlActionResult {
   assetIndex: number;
   action: Record<string, unknown>; // {type:'order', orders:[...], grouping:'na'}
   nonce: number; // ms timestamp
+  /**
+   * The L1-action signature, produced in-process by getEvmSigner('hyperliquid')
+   * over the phantom-agent EIP-712 digest (msgpack(action)+nonce+vault hash).
+   * Carried here (like the PM order's `signature`) so submit() can POST it
+   * without re-signing. {r,s,v} is the wire shape /exchange expects.
+   */
+  signature: { r: `0x${string}`; s: `0x${string}`; v: number };
   postUrl: string;
 }
 

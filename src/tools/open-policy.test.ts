@@ -6,7 +6,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { handleMoneyTool, type ToolDeps } from "./index.js";
-import { makeIntentStore, makeReconciler, makeGasPlanner, makeFundingPlanner, makeVenueEnabler } from "./deps.js";
+import { makeIntentStore, makeReconciler, makeGasPlanner, makeFundingPlanner } from "./deps.js";
+import { makeRealVenueEnabler } from "../adapters/venue-enabler.js";
 import type { VenueAdapter, BuildResult } from "../adapters/types.js";
 import { addDecimal, mulDecimal, openNotionalUsd, type RiskLimits, type DailyUsage } from "../policy/limits.js";
 
@@ -52,7 +53,7 @@ function makeDeps(limits: RiskLimits): ToolDeps {
     treasury: async () => ({ byChain: {}, sealed: false }),
     gas: makeGasPlanner(),
     funding: makeFundingPlanner(),
-    enabler: makeVenueEnabler(),
+    enabler: makeRealVenueEnabler(),
     dailyRelayerQuota: 100,
     signerLoaded: () => true,
     withdrawMaxPerCall: () => "0",

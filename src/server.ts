@@ -15,6 +15,8 @@ import { bootUnlock, loadedAddresses, activeKeySource } from "./signers/index.js
 import { INSTRUCTIONS } from "./instructions.js";
 import { utcDayKey, addDecimal, type RiskLimits, type DailyUsage } from "./policy/limits.js";
 import { polymarketAdapter } from "./adapters/polymarket.js";
+import { hyperliquidAdapter } from "./adapters/hyperliquid.js";
+import { makeRealVenueEnabler } from "./adapters/venue-enabler.js";
 import type { VenueAdapter, Venue } from "./adapters/types.js";
 import {
   MONEY_TOOLS,
@@ -28,7 +30,6 @@ import {
   makeGasPlanner,
   makeIntentStore,
   makeReconciler,
-  makeVenueEnabler,
 } from "./tools/deps.js";
 
 const log = (m: string) => process.stderr.write(`[starling] ${m}\n`);
@@ -100,10 +101,12 @@ function buildToolDeps(): ToolDeps {
     if (usage.dayKey !== today) usage = { dayKey: today, openedNotionalUsd: "0", realizedLossUsd: "0" };
   };
 
-  // Inject live venue adapters only when their signer is loaded. Polymarket is
-  // wired (CLOB V2, sig-0 EOA, build→sign→submit). HL/Jupiter join here next.
+  // Inject live venue adapters only when their signer is loaded. Polymarket
+  // (CLOB V2, sig-0 EOA) and Hyperliquid (L1 IOC actions, signing locked to the
+  // SDK vector) are wired build→sign→submit. Jupiter/Solana joins here next.
   const adapters: Partial<Record<Venue, VenueAdapter>> = {};
   if (addrs.polygon) adapters.polymarket = polymarketAdapter;
+  if (addrs.hyperliquid) adapters.hyperliquid = hyperliquidAdapter;
 
   return {
     botId: process.env.STARLING_BOT_ID ?? "default",
@@ -114,7 +117,7 @@ function buildToolDeps(): ToolDeps {
     treasury: loadSealedTreasury,
     gas: makeGasPlanner(),
     funding: makeFundingPlanner(),
-    enabler: makeVenueEnabler(),
+    enabler: makeRealVenueEnabler(),
     dailyRelayerQuota: Number(process.env.STARLING_RELAYER_QUOTA ?? 100),
     signerLoaded: (venue) => !!addrs[venueChain[venue]],
     // "0" blocks all withdraws until the user sets an explicit per-call ceiling.
