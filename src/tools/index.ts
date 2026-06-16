@@ -66,6 +66,12 @@ import {
   type SealedTreasury,
   WithdrawError,
 } from "../withdraw/allowlist.js";
+import {
+  checkOpen,
+  openNotionalUsd,
+  type DailyUsage,
+  type RiskLimits,
+} from "../policy/limits.js";
 
 // ── result helpers ──────────────────────────────────────────────────────────
 // Matches the shape server.ts already returns: { content: [{type:"text", text}] }.
@@ -96,6 +102,7 @@ type ToolErrorCode =
   | "treasury_refused"
   | "not_found"
   | "retry_blocked"
+  | "risk_blocked"
   | "binding_mismatch"
   | "internal";
 
@@ -197,6 +204,12 @@ export interface ToolDeps {
   signerLoaded(venue: Venue): boolean;
   /** Per-call withdraw ceiling, sourced from risk limits — NOT from the agent. */
   withdrawMaxPerCall(chain: Chain): string;
+  /** The USER-SET risk limits (per-trade/daily caps + kill-switch). Not agent-set. */
+  limits(): RiskLimits;
+  /** Today's accumulated usage for the daily caps (caller rolls it at UTC midnight). */
+  dailyUsage(): DailyUsage;
+  /** Record a freshly-built open's USD notional toward the daily cap. */
+  recordOpen(notionalUsd: string): void;
 }
 
 // ── tool schemas (merged into server.ts's TOOLS array) ───────────────────────
@@ -590,16 +603,27 @@ async function handleOpenPosition(deps: ToolDeps, a: Args): Promise<ToolText> {
   };
   const adapter = getAdapter(deps, venue);
 
+  // POLICY GATE (the layer above the signer): the USER-SET caps decide before any
+  // build. notional = collateral USD for a BUY, else shares * worstPrice.
+  const notionalUsd = openNotionalUsd(intent.amount, intent.amountKind, intent.worstPrice);
+  const decision = checkOpen(notionalUsd, deps.limits(), deps.dailyUsage());
+  if (!decision.allowed) {
+    return fail("risk_blocked", decision.message, { policyCode: decision.code, notionalUsd });
+  }
+
   const res = await throughIntent(
     deps,
     { idempotencyKey: intent.idempotencyKey, kind: "open", intendedSize: intent.amount },
     () => adapter.buildOpen(intent),
   );
+  // Count it toward the daily cap only on a fresh build (replays already counted).
+  if (!res.replayed) deps.recordOpen(notionalUsd);
 
   return ok({
     ok: true,
     replayed: res.replayed,
     state: res.record.state,
+    notionalUsd,
     intent: { venue, marketId: intent.marketId, side: intent.side, amount: intent.amount },
     // The UNSIGNED artifact for the local signer. Never signed/broadcast here.
     build: res.build,

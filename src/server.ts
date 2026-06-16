@@ -13,6 +13,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { bootUnlock, loadedAddresses, activeKeySource } from "./signers/index.js";
 import { INSTRUCTIONS } from "./instructions.js";
+import { utcDayKey, addDecimal, type RiskLimits, type DailyUsage } from "./policy/limits.js";
 import {
   MONEY_TOOLS,
   MONEY_TOOL_NAMES,
@@ -81,6 +82,22 @@ function buildToolDeps(): ToolDeps {
     jupiter: "solana",
   };
 
+  // USER-SET risk limits (env; "0" = that check is OFF, the default). For a
+  // minimal real-funds test, set e.g. STARLING_PER_TRADE_MAX_USD=5. These are the
+  // dial the user controls — the engine only enforces what's set, never imposes.
+  const limits: RiskLimits = {
+    perTradeMaxUsd: process.env.STARLING_PER_TRADE_MAX_USD ?? "0",
+    dailyNotionalCapUsd: process.env.STARLING_DAILY_NOTIONAL_CAP_USD ?? "0",
+    dailyLossCapUsd: process.env.STARLING_DAILY_LOSS_CAP_USD ?? "0",
+    killSwitch: (process.env.STARLING_KILL_SWITCH ?? "").toLowerCase() === "true",
+  };
+  // In-memory daily usage; rolls at UTC midnight. (Swap in a persisted store later.)
+  let usage: DailyUsage = { dayKey: utcDayKey(), openedNotionalUsd: "0", realizedLossUsd: "0" };
+  const rollUsage = () => {
+    const today = utcDayKey();
+    if (usage.dayKey !== today) usage = { dayKey: today, openedNotionalUsd: "0", realizedLossUsd: "0" };
+  };
+
   return {
     botId: process.env.STARLING_BOT_ID ?? "default",
     adapters: {}, // Phase 1 (PM) / 4 (HL) / 5 (Jupiter) inject here.
@@ -93,7 +110,17 @@ function buildToolDeps(): ToolDeps {
     enabler: makeVenueEnabler(),
     dailyRelayerQuota: Number(process.env.STARLING_RELAYER_QUOTA ?? 100),
     signerLoaded: (venue) => !!addrs[venueChain[venue]],
+    // "0" blocks all withdraws until the user sets an explicit per-call ceiling.
     withdrawMaxPerCall: () => process.env.STARLING_WITHDRAW_MAX ?? "0",
+    limits: () => limits,
+    dailyUsage: () => {
+      rollUsage();
+      return usage;
+    },
+    recordOpen: (n: string) => {
+      rollUsage();
+      usage = { ...usage, openedNotionalUsd: addDecimal(usage.openedNotionalUsd, n) };
+    },
   };
 }
 

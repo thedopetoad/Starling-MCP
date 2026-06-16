@@ -69,6 +69,32 @@ export function addDecimal(a: string, b: string): string {
   return frac ? `${intPart}.${frac}` : intPart;
 }
 
+/** Multiply two non-negative decimal strings exactly (BigInt-scaled; no float drift). */
+export function mulDecimal(a: string, b: string): string {
+  const [ai, af = ""] = a.split(".");
+  const [bi, bf = ""] = b.split(".");
+  const scale = af.length + bf.length;
+  const prod = BigInt((ai + af) || "0") * BigInt((bi + bf) || "0");
+  if (scale === 0) return prod.toString();
+  const s = prod.toString().padStart(scale + 1, "0");
+  const intPart = s.slice(0, s.length - scale);
+  const frac = s.slice(s.length - scale).replace(/0+$/, "");
+  return frac ? `${intPart}.${frac}` : intPart;
+}
+
+/**
+ * The USD notional of an open, for the cap checks. Polymarket BUY amounts are
+ * already collateral USD; everything denominated in shares/contracts is
+ * shares * price. Decimal-exact.
+ */
+export function openNotionalUsd(
+  amount: string,
+  amountKind: "collateral" | "shares",
+  price: string,
+): string {
+  return amountKind === "collateral" ? amount : mulDecimal(amount, price);
+}
+
 /**
  * Decide whether an OPEN of `amountUsd` notional is allowed under `limits`,
  * given today's `usage`. Caller passes the trade's USD notional (already
