@@ -2,11 +2,10 @@
   "mcpServers": {
     "starling": {
       "command": "npx",
-      "args": ["-y", "@starling/execution-mcp@1.0.0"],
+      "args": ["-y", "github:thedopetoad/Starling-MCP"],
       "env": {
         "STARLING_KEY_SOURCE": "auto",
-        "STARLING_NETWORK": "testnet",
-        "STARLING_KEY": "sk_live_REPLACE_ME_analytics_only"
+        "STARLING_NETWORK": "testnet"
       }
     }
   }

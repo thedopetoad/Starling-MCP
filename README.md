@@ -28,6 +28,19 @@ STARLING_PK_SOLANA=<base58|hex> \
 Plaintext is fine for testnet / small float — the server warns you. When you
 want real safety, switch to the encrypted keystore (below) by changing one env var.
 
+**Pointing your agent at it (no clone needed):** put this in your MCP host's
+`mcp.json` — npx fetches, builds, and runs it straight from GitHub:
+
+```json
+{ "mcpServers": { "starling": {
+  "command": "npx",
+  "args": ["-y", "github:thedopetoad/Starling-MCP"],
+  "env": { "STARLING_KEY_SOURCE": "auto", "STARLING_NETWORK": "testnet" }
+} } }
+```
+
+(Or use a local clone: `"command": "node", "args": ["/path/to/Starling-MCP/dist/bin/starling-mcp.js"]`.)
+
 ## How the MCP gets your keys (modular)
 
 `STARLING_KEY_SOURCE` selects where signing secrets come from. The MCP signs
