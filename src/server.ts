@@ -12,6 +12,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { bootUnlock, loadedAddresses, activeKeySource } from "./signers/index.js";
+import { INSTRUCTIONS } from "./instructions.js";
 import {
   MONEY_TOOLS,
   MONEY_TOOL_NAMES,
@@ -29,6 +30,7 @@ import {
 
 const log = (m: string) => process.stderr.write(`[starling] ${m}\n`);
 const text = (obj: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(obj, null, 2) }] });
+const raw = (s: string) => ({ content: [{ type: "text" as const, text: s }] });
 
 const EMPTY = { type: "object" as const, properties: {} };
 
@@ -50,6 +52,12 @@ const TOOLS = [
   {
     name: "ping",
     description: "Liveness + server clock (ms since epoch).",
+    inputSchema: EMPTY,
+  },
+  {
+    name: "get_instructions",
+    description:
+      "Read FIRST. How to drive Starling: the correct call order, the no-key vs key boundary, the safety rules (worst-price required, idempotencyKey required, withdraw-only-to-treasury), funding/gas, venues, and what's live this session.",
     inputSchema: EMPTY,
   },
   ...MONEY_TOOLS,
@@ -123,6 +131,8 @@ export async function startServer(): Promise<void> {
 
     const addrs = loadedAddresses();
     switch (name) {
+      case "get_instructions":
+        return raw(INSTRUCTIONS);
       case "auth_check":
         return text({
           network: process.env.STARLING_NETWORK ?? "testnet",
