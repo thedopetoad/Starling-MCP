@@ -19,6 +19,7 @@ import { hyperliquidAdapter } from "./adapters/hyperliquid.js";
 import { jupiterAdapter } from "./adapters/jupiter.js";
 import { makeRealVenueEnabler } from "./adapters/venue-enabler.js";
 import { DeBridgeBridge } from "./bridge/debridge.js";
+import { cctpBridge } from "./bridge/cctp.js";
 import type { Bridge, BridgeProvider } from "./bridge/types.js";
 import type { VenueAdapter, Venue, Chain } from "./adapters/types.js";
 import {
@@ -112,9 +113,8 @@ function buildToolDeps(): ToolDeps {
   if (addrs.hyperliquid) adapters.hyperliquid = hyperliquidAdapter;
   if (addrs.solana) adapters.jupiter = jupiterAdapter;
 
-  // deBridge DLN (validated SOL->Polygon build->sign->simulate). Source address is
-  // resolved per-route from the loaded signers — NEVER an agent argument. CCTP
-  // joins here once its draft is validated the same way.
+  // deBridge DLN (live-validated SOL<->EVM + native-gas legs). Source address is
+  // resolved per-route from the loaded signers — NEVER an agent argument.
   const bridges: Partial<Record<BridgeProvider, Bridge>> = {};
   if (addrs.solana || addrs.polygon || addrs.hyperliquid) {
     bridges.debridge = new DeBridgeBridge({
@@ -125,11 +125,20 @@ function buildToolDeps(): ToolDeps {
       },
     });
   }
+  // CCTP V2 (Circle burn-and-mint, the ~1:1 USDC rail between EVM chains;
+  // live-validated Polygon<->Arbitrum). The mintRecipient is pinned by the build
+  // from route.recipient (treasury/thin-wallet), never an agent argument. Needs
+  // STARLING_RPC_POLYGON / _ARBITRUM for the usedNonces mint-proof + balance reads;
+  // tool calls error honestly at call-time if those are unset. Gated on an EVM
+  // signer (CCTP is EVM-source; the Solana leg is Stage-2).
+  if (addrs.polygon || addrs.hyperliquid) {
+    bridges.cctp = cctpBridge;
+  }
 
   return {
     botId: process.env.STARLING_BOT_ID ?? "default",
     adapters,
-    bridges, // deBridge wired; CCTP joins once validated.
+    bridges, // deBridge + CCTP wired (both live-validated).
     store: makeIntentStore(),
     reconciler: makeReconciler(),
     treasury: loadSealedTreasury,
