@@ -79,7 +79,7 @@ import {
   type DailyUsage,
   type RiskLimits,
 } from "../policy/limits.js";
-import type { Executor } from "../exec/executor.js";
+import type { Executor, ExecResult } from "../exec/executor.js";
 import { runTransfer, advanceBridge } from "./transfer.js";
 
 // ── result helpers ──────────────────────────────────────────────────────────
@@ -673,26 +673,39 @@ async function handleOpenPosition(deps: ToolDeps, a: Args): Promise<ToolText> {
   // Count it toward the daily cap only on a fresh build (replays already counted).
   if (!res.replayed) deps.recordOpen(notionalUsd);
 
-  // Off-chain order books (PM CLOB / HL exchange) expose submit() — POST the
-  // locally-signed order now. Venues whose build is an on-chain tx have no
-  // submit(); they return the build for the caller to broadcast.
+  // Settle the build so the trade EXECUTES through the tool. Off-chain order books
+  // (PM CLOB / HL exchange) expose submit() and we POST the locally-signed order;
+  // on-chain venues (Jupiter = a Solana tx) have no submit(), so we sign + broadcast
+  // + confirm via the Executor (blockhash refreshed).
   let submit: SubmitResult | undefined;
-  if (!res.replayed && res.build && adapter.submit) {
-    submit = await adapter.submit(res.build);
-    await deps.store.patch(deps.botId, intent.idempotencyKey, {
-      state: submit.posted ? "FILLED" : "FAILED",
-      txHashes: submit.txHashes ?? [],
-      error: submit.posted ? undefined : { code: "no_liquidity", message: submit.error ?? "order rejected", recoverable: true, suggestedAction: "re-quote and retry with the same idempotencyKey" },
-    });
+  let exec: ExecResult | undefined;
+  if (!res.replayed && res.build) {
+    if (adapter.submit) {
+      submit = await adapter.submit(res.build);
+      await deps.store.patch(deps.botId, intent.idempotencyKey, {
+        state: submit.posted ? "FILLED" : "FAILED",
+        txHashes: submit.txHashes ?? [],
+        error: submit.posted ? undefined : { code: "no_liquidity", message: submit.error ?? "order rejected", recoverable: true, suggestedAction: "re-quote and retry with the same idempotencyKey" },
+      });
+    } else if (res.build.kind === "solanaTx") {
+      exec = await deps.executor.exec({ chain: "solana", kind: "solanaTx", payload: res.build.unsignedTxB64, label: "open" });
+      await deps.store.patch(deps.botId, intent.idempotencyKey, {
+        state: exec.ok ? "FILLED" : "FAILED",
+        txHashes: exec.txHash ? [exec.txHash] : [],
+        error: exec.ok ? undefined : { code: "no_liquidity", message: exec.error ?? "swap did not confirm", recoverable: true, suggestedAction: "re-quote and retry with a NEW idempotencyKey" },
+      });
+    }
   }
 
+  const filled = submit ? submit.posted : exec ? exec.ok : undefined;
   return ok({
-    ok: submit ? submit.posted : true,
+    ok: filled ?? true,
     replayed: res.replayed,
-    state: submit ? (submit.posted ? "FILLED" : "FAILED") : res.record.state,
+    state: filled === undefined ? res.record.state : filled ? "FILLED" : "FAILED",
     notionalUsd,
     intent: { venue, marketId: intent.marketId, side: intent.side, amount: intent.amount },
     submit,
+    exec,
     build: res.build,
     note: res.replayed
       ? "idempotencyKey already used — returning the ORIGINAL result, not a new order."
@@ -700,7 +713,11 @@ async function handleOpenPosition(deps: ToolDeps, a: Args): Promise<ToolText> {
         ? submit.posted
           ? "Order POSTed to the venue (locally signed, bounded by worstPrice + caps)."
           : `Order rejected: ${submit.error}`
-        : "UNSIGNED build. Sign with the local key, then broadcast.",
+        : exec
+          ? exec.ok
+            ? "Swap signed + broadcast + confirmed on-chain (bounded by worstPrice + caps)."
+            : `Swap failed: ${exec.error}`
+          : "UNSIGNED build. Sign with the local key, then broadcast.",
   });
 }
 
@@ -735,29 +752,40 @@ async function handleClosePosition(deps: ToolDeps, a: Args): Promise<ToolText> {
     () => adapter.buildClose(intent),
   );
 
-  // Off-chain order books (PM CLOB / HL exchange) expose submit() — POST the
-  // locally-signed close NOW, mirroring open_position. Without this a tool-driven
-  // close would build a signed order and never post it, so the position never
-  // closes. Venues whose build is an on-chain tx have no submit() and return the
-  // build for the caller to broadcast.
+  // Settle the close so it EXECUTES through the tool (mirrors open_position): POST
+  // the locally-signed close for off-chain venues (PM/HL), or sign+broadcast+confirm
+  // the on-chain close swap (Jupiter = a Solana tx) via the Executor. Without this a
+  // tool-driven close would build a signed artifact and never settle it.
   let submit: SubmitResult | undefined;
-  if (!res.replayed && res.build && adapter.submit) {
-    submit = await adapter.submit(res.build);
-    await deps.store.patch(deps.botId, intent.idempotencyKey, {
-      state: submit.posted ? "FILLED" : "FAILED",
-      txHashes: submit.txHashes ?? [],
-      error: submit.posted
-        ? undefined
-        : { code: "no_liquidity", message: submit.error ?? "close order rejected", recoverable: true, suggestedAction: "re-quote and retry with the same idempotencyKey" },
-    });
+  let exec: ExecResult | undefined;
+  if (!res.replayed && res.build) {
+    if (adapter.submit) {
+      submit = await adapter.submit(res.build);
+      await deps.store.patch(deps.botId, intent.idempotencyKey, {
+        state: submit.posted ? "FILLED" : "FAILED",
+        txHashes: submit.txHashes ?? [],
+        error: submit.posted
+          ? undefined
+          : { code: "no_liquidity", message: submit.error ?? "close order rejected", recoverable: true, suggestedAction: "re-quote and retry with the same idempotencyKey" },
+      });
+    } else if (res.build.kind === "solanaTx") {
+      exec = await deps.executor.exec({ chain: "solana", kind: "solanaTx", payload: res.build.unsignedTxB64, label: "close" });
+      await deps.store.patch(deps.botId, intent.idempotencyKey, {
+        state: exec.ok ? "FILLED" : "FAILED",
+        txHashes: exec.txHash ? [exec.txHash] : [],
+        error: exec.ok ? undefined : { code: "no_liquidity", message: exec.error ?? "close swap did not confirm", recoverable: true, suggestedAction: "re-quote and retry with a NEW idempotencyKey" },
+      });
+    }
   }
 
+  const closed = submit ? submit.posted : exec ? exec.ok : undefined;
   return ok({
-    ok: submit ? submit.posted : true,
+    ok: closed ?? true,
     replayed: res.replayed,
-    state: submit ? (submit.posted ? "FILLED" : "FAILED") : res.record.state,
+    state: closed === undefined ? res.record.state : closed ? "FILLED" : "FAILED",
     intent: { venue, marketId: intent.marketId, fraction: intent.fraction },
     submit,
+    exec,
     build: res.build,
     note: res.replayed
       ? "idempotencyKey already used — returning the ORIGINAL result, not a new close."
@@ -765,7 +793,11 @@ async function handleClosePosition(deps: ToolDeps, a: Args): Promise<ToolText> {
         ? submit.posted
           ? "Close POSTed to the venue (locally signed, bounded by worstPrice)."
           : `Close rejected: ${submit.error}`
-        : "UNSIGNED close build. Sign with the local key, reconcile, then broadcast.",
+        : exec
+          ? exec.ok
+            ? "Close swap signed + broadcast + confirmed on-chain."
+            : `Close swap failed: ${exec.error}`
+          : "UNSIGNED close build. Sign with the local key, reconcile, then broadcast.",
   });
 }
 
