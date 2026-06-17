@@ -27,17 +27,23 @@ setup; required for Polymarket) → **get_quote** → **open_position** → moni
 (**list_positions**) → **close_position** → **build_withdraw** (home).
 
 ## What EXECUTES vs what returns UNSIGNED (read this)
-I am end-to-end for the OFF-CHAIN order path, and build-only for the ON-CHAIN tx
-path (for now — an in-tool broadcaster is the next milestone):
-- **open_position / close_position** — I build, LOCALLY SIGN, and POST the order
-  to the venue (PM CLOB / HL exchange), then report fill state. Fully executed.
-- **build_withdraw(chain=hyperliquid)** — I execute HL's native withdraw3: USDC
-  lands at your OWN address on Arbitrum (~5 min, $1 flat HL fee). Fully executed.
-- **build_bridge / ensure_gas / plan_funding_route / enable_venue /
-  build_withdraw(chain=polygon|solana)** — I return UNSIGNED txs (recipients
-  PINNED by me, never your argument). Sign + broadcast them with your local key.
-  The committed reference harness 'scripts/live.mjs' is the worked pattern for
-  every one of these (DRY by default; '--live' to send).
+Most money paths now run END TO END through me; a few low-level builders still hand
+back UNSIGNED txs you broadcast.
+- **open_position / close_position** — I build, LOCALLY SIGN, and SETTLE: POST to the
+  venue (PM CLOB / HL exchange) or sign+broadcast+confirm on-chain (Jupiter/Solana).
+  Fully executed; I report the fill / txid.
+- **transfer** — move USDC between YOUR OWN wallets across chains. I AUTO-PICK the
+  rail (CCTP when both legs are EVM + the dest has gas; else deBridge / any Solana
+  leg), execute the source leg(s), and return a flightId. **advance_bridge** then
+  drives it to delivery (CCTP: I broadcast the mint once Iris attests; deBridge: the
+  solver delivers). Fully executed across both phases — the recommended way to bridge.
+- **build_withdraw(chain=hyperliquid)** — I execute HL's native withdraw3 to your OWN
+  Arbitrum address (~5 min, $1 flat HL fee). Fully executed.
+- **build_bridge / ensure_gas / enable_venue / plan_funding_route /
+  build_withdraw(chain=polygon|solana)** — lower-level builders: I return UNSIGNED
+  txs (recipients PINNED by me, never your argument) for you to sign + broadcast.
+  Prefer 'transfer' for plain cross-chain USDC; these are for bespoke flows. The
+  reference harness 'scripts/live.mjs' shows the broadcast pattern.
 
 ## Non-negotiable rules
 - **Every order needs a worst price.** There is no market order — slippage is
@@ -77,18 +83,18 @@ open_position checks the caps BEFORE building, so a blocked trade never signs.
   PM open/close may be rejected by the CLOB today — Hyperliquid + Solana are the
   unblocked venues. enable_venue (pUSD wrap + scoped approvals) is built.
 
-## Funding & gas (WIRED — I return UNSIGNED legs; sign+broadcast per above)
+## Funding & gas (WIRED — 'transfer'/'advance_bridge' EXECUTE; build_* are lower-level)
 - **CCTP** — the ~1:1 USDC rail between EVM chains (Polygon <-> Arbitrum). Needs
   'STARLING_RPC_POLYGON' / 'STARLING_RPC_ARBITRUM' for the mint-proof. Standard
   lane is free + hard-finality; 'fast' costs a small Circle fee.
 - **deBridge** — the mesh for everything else: Solana <-> EVM USDC, and native-gas
   top-ups on any chain. The solver delivers (no destination gas needed) for a
   small fee + a source fixFee.
-- Flow: **bridge_quote** (fee/ETA/finality) → **build_bridge** → broadcast →
-  **get_bridge_status** (confirms the destination effect on-chain, not just a mint
-  delta). **ensure_gas** tops up native gas; **plan_funding_route** bundles USDC +
-  a gas leg for a fresh EOA. I auto-pick the rail (USDC EVM<->EVM = CCTP, else
-  deBridge) unless you name a provider.
+- Easiest: **transfer** (auto-rail, executes) → **advance_bridge** (drive to delivery).
+  Lower-level: **bridge_quote** (fee/ETA/finality) → **build_bridge** → you broadcast
+  → **get_bridge_status**. **ensure_gas** tops up native gas; **plan_funding_route**
+  bundles USDC + a gas leg for a fresh EOA. The rail is auto-picked (USDC EVM<->EVM =
+  CCTP, else deBridge) unless you name a provider.
 - Gas is on you: a brand-new wallet needs a little native (MATIC/ETH/SOL) to make
   its first move; after that ensure_gas can ride a top-up along with funding.
 
