@@ -12,6 +12,8 @@ dist/
 
 # local-only operator utilities (machine paths; touch real wallets)
 scripts/*
-# ...except the committed reference harness — the worked end-to-end lifecycle a
+# ...except the committed reference harnesses — the worked end-to-end lifecycle a
 # cold operator/agent can read + run. DRY by default; only --live ever broadcasts.
+# live.mjs drives the ADAPTERS; mcp-live.mjs drives the MCP TOOL surface.
 !scripts/live.mjs
+!scripts/mcp-live.mjs
