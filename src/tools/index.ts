@@ -79,6 +79,7 @@ import {
   type DailyUsage,
   type RiskLimits,
 } from "../policy/limits.js";
+import type { Executor } from "../exec/executor.js";
 
 // ── result helpers ──────────────────────────────────────────────────────────
 // Matches the shape server.ts already returns: { content: [{type:"text", text}] }.
@@ -205,6 +206,10 @@ export interface ToolDeps {
   gas: GasPlanner;
   funding: FundingPlanner;
   enabler: VenueEnabler;
+  /** Signs + broadcasts + confirms the UNSIGNED on-chain legs the builders produce
+   *  (bridge / gas / venue-setup / EVM+SOL sweep), under inspect-before-sign. This
+   *  is what lets the on-chain tools EXECUTE instead of handing back unsigned txs. */
+  executor: Executor;
   /** Polymarket per-builder daily relayer quota (shared budget) for canRetry. */
   dailyRelayerQuota: number;
   /** Which venues currently have a loaded local signer (gates money moves). */

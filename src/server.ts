@@ -20,6 +20,7 @@ import { jupiterAdapter } from "./adapters/jupiter.js";
 import { makeRealVenueEnabler } from "./adapters/venue-enabler.js";
 import { DeBridgeBridge } from "./bridge/debridge.js";
 import { cctpBridge } from "./bridge/cctp.js";
+import { makeExecutor } from "./exec/executor.js";
 import type { Bridge, BridgeProvider } from "./bridge/types.js";
 import type { VenueAdapter, Venue, Chain } from "./adapters/types.js";
 import {
@@ -145,6 +146,9 @@ function buildToolDeps(): ToolDeps {
     gas: makeGasPlanner(),
     funding: makeFundingPlanner(),
     enabler: makeRealVenueEnabler(),
+    // Signs + broadcasts + confirms the on-chain legs locally (same broadcasters
+    // the harness uses). The on-chain tools call this to EXECUTE, not just build.
+    executor: makeExecutor(),
     dailyRelayerQuota: Number(process.env.STARLING_RELAYER_QUOTA ?? 100),
     signerLoaded: (venue) => !!addrs[venueChain[venue]],
     // "0" blocks all withdraws until the user sets an explicit per-call ceiling.

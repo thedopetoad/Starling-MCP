@@ -54,6 +54,7 @@ function makeDeps(limits: RiskLimits): ToolDeps {
     gas: makeGasPlanner(),
     funding: makeFundingPlanner(),
     enabler: makeRealVenueEnabler(),
+    executor: { async exec() { throw new Error("executor not used in this test"); }, async execSequence() { return []; } },
     dailyRelayerQuota: 100,
     signerLoaded: () => true,
     withdrawMaxPerCall: () => "0",

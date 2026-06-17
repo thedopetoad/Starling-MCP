@@ -94,6 +94,33 @@ export function readFeePayer(message: Uint8Array): { numRequiredSignatures: numb
   return { numRequiredSignatures, feePayer: base58.encode(key0) };
 }
 
+/**
+ * Overwrite the 32-byte recent blockhash in a v0/legacy tx message with a fresh
+ * one. A builder (Jupiter swap / deBridge source order) bakes a blockhash at build
+ * time that goes stale across the build round-trips; the blockhash is tx-LIVENESS
+ * only — it is NOT part of the swap/order semantics (those live in the
+ * instructions) — so replacing it lets the source tx land without changing what it
+ * does. Layout after the sig array:
+ *   [version 0x80?][header 3B][shortvec keys][keys*32][recentBlockhash 32B][ix...]
+ * Fails CLOSED (throws) on any truncation or a bad-length blockhash.
+ */
+export function refreshBlockhash(unsignedTxB64: string, newBlockhashBase58: string): string {
+  const buf = Uint8Array.from(Buffer.from(unsignedTxB64, "base64"));
+  const [sigCount, sigStart] = readShortVec(buf, 0);
+  let off = sigStart + 64 * sigCount; // message start
+  if (off >= buf.length) throw new SolanaTxError("truncated", "no message after the signature region");
+  if (buf[off] & 0x80) off += 1; // v0/versioned: skip the version-prefix byte
+  off += 3; // 3-byte message header
+  const [numKeys, kLen] = readShortVec(buf, off);
+  off += kLen + numKeys * 32; // skip static account keys -> blockhash starts here
+  if (off + 32 > buf.length) throw new SolanaTxError("truncated", "no room for a 32-byte blockhash");
+  const bh = base58.decode(newBlockhashBase58);
+  if (bh.length !== 32) throw new SolanaTxError("bad_blockhash", `blockhash decoded to ${bh.length} bytes, expected 32`);
+  const out = Uint8Array.from(buf); // copy
+  out.set(bh, off);
+  return Buffer.from(out).toString("base64");
+}
+
 export interface SignResult {
   /** base64 fully-signed transaction, ready for sendTransaction (encoding base64). */
   signedTxB64: string;
