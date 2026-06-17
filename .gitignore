@@ -11,4 +11,7 @@ dist/
 !.env.example
 
 # local-only operator utilities (machine paths; touch real wallets)
-scripts/
+scripts/*
+# ...except the committed reference harness — the worked end-to-end lifecycle a
+# cold operator/agent can read + run. DRY by default; only --live ever broadcasts.
+!scripts/live.mjs

@@ -139,6 +139,34 @@ github:thedopetoad/Starling-MCP` and call `tools/list`.
 > See [Security invariants](#security-invariants) and the threat model for the
 > honest ceiling on that guarantee.
 
+## Reference harness (the worked lifecycle)
+
+[`scripts/live.mjs`](./scripts/live.mjs) is the committed, end-to-end reference for
+*every* flow in the stack — funding, gas, bridging, and the full trade lifecycle on
+each venue. It plays the **caller/agent** role: it drives the same adapters and
+bridges the MCP tools use, signs locally with your key, broadcasts, and confirms
+on-chain. Two reasons it's in the repo:
+
+- **Read it** to see the exact call sequence for a flow before you ask your agent
+  to do it (or before you wire your own bot).
+- **Run it** to live-integration-check a venue or rail end to end.
+
+**It is DRY by default.** Every money stage builds + simulates and sends *nothing*;
+only the explicit `--live` flag ever broadcasts — so you can dry-run the whole thing
+for free and watch each step before committing a cent.
+
+```bash
+npm run build                                  # the harness imports from dist/
+node --env-file=../starling-test/agent.env scripts/live.mjs balances
+node --env-file=../starling-test/agent.env scripts/live.mjs hl-withdraw 4         # DRY: builds + signs only
+node --env-file=../starling-test/agent.env scripts/live.mjs hl-withdraw 4 --live  # actually broadcasts
+```
+
+Stages: `balances`, `swap`, `bridge`, `hl-deposit`, `hl-trade`, `hl-close`,
+`hl-withdraw`, `pm-creds`, `pm-enable`, `poly-swap`, `pm-trade`, `route`, `cctp`,
+`transfer`. Run with no stage to print the list. Any key source works; the
+`env`-source `--env-file` shown above is just the quickest.
+
 ## How the MCP gets your keys (modular)
 
 `STARLING_KEY_SOURCE` selects where signing secrets come from. The MCP signs
