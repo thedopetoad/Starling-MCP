@@ -80,15 +80,35 @@ export class EvmRpc implements EvmRpcLike {
   }
 
   private async call<T>(method: string, params: unknown[]): Promise<T> {
-    const res = await this.fetchImpl(this.url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: ++this.id, method, params }),
-    });
-    if (!res.ok) throw new Error(`EVM RPC ${method} -> HTTP ${res.status}`);
-    const json = (await res.json()) as { result?: T; error?: { message: string } };
-    if (json.error) throw new Error(`EVM RPC ${method}: ${json.error.message}`);
-    return json.result as T;
+    // Retry TRANSPORT errors only (fetch throw = socket/DNS/TLS drop, HTTP 5xx, or
+    // 429) — the public RPCs drop connections intermittently and a single blip must
+    // not kill a multi-tx money sequence. A legit RPC error (json.error: revert,
+    // "nonce too low", "already known") or a 4xx is DETERMINISTIC and never retried
+    // — re-sending would not change the outcome. Safe for sendRawTransaction too:
+    // the raw bytes are identical (same nonce => same hash), so a node that already
+    // has it returns "already known", which the broadcaster swallows + confirms by
+    // receipt rather than re-signing.
+    const body = JSON.stringify({ jsonrpc: "2.0", id: ++this.id, method, params });
+    const MAX = 4;
+    let lastErr: unknown;
+    for (let attempt = 0; attempt <= MAX; attempt++) {
+      if (attempt > 0) await new Promise((r) => setTimeout(r, 300 * attempt));
+      let res: Response;
+      try {
+        res = await this.fetchImpl(this.url, { method: "POST", headers: { "Content-Type": "application/json" }, body });
+      } catch (e) {
+        lastErr = e; // transport drop — retry
+        continue;
+      }
+      if (!res.ok) {
+        if (res.status >= 500 || res.status === 429) { lastErr = new Error(`EVM RPC ${method} -> HTTP ${res.status}`); continue; }
+        throw new Error(`EVM RPC ${method} -> HTTP ${res.status}`); // 4xx — terminal
+      }
+      const json = (await res.json()) as { result?: T; error?: { message: string } };
+      if (json.error) throw new Error(`EVM RPC ${method}: ${json.error.message}`); // RPC-level error — terminal
+      return json.result as T;
+    }
+    throw lastErr instanceof Error ? lastErr : new Error(`EVM RPC ${method} failed after ${MAX} retries`);
   }
 
   /** eth_chainId — used to ASSERT the RPC matches the chain we built/sign for. */
