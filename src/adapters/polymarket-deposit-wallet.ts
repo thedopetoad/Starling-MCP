@@ -23,6 +23,8 @@ import {
   concat,
   encodeAbiParameters,
   getCreate2Address,
+  hashTypedData,
+  hexToBytes,
   keccak256,
   pad,
   toHex,
@@ -109,4 +111,124 @@ export async function assertUUPSFactory(
         "initCodeHashERC1967BeaconProxy from the SDK and add a Beacon path before deriving.",
     );
   }
+}
+
+// ── POLY_1271 (ERC-7739) order signing ──────────────────────────────────────
+// V2 deposit-wallet orders sign with signatureType=3 via an ERC-7739 "defensive
+// nested" signature: the EOA signs a TypedDataSign that wraps the Order as
+// `contents` under the deposit-wallet's own domain, and the on-wire signature packs
+// innerSig ++ appDomainSep ++ contentsHash ++ ORDER_TYPE_STRING ++ uint16(len).
+// Ported VERBATIM from clob-client-v2 ExchangeOrderBuilderV2.buildOrderSignature and
+// LOCKED to an SDK-generated vector in the test. maker == signer == deposit wallet.
+
+/** The V2 Order EIP-712 type string (hashed for ORDER_TYPE_HASH). */
+export const ORDER_TYPE_STRING =
+  "Order(uint256 salt,address maker,address signer,uint256 tokenId,uint256 makerAmount,uint256 takerAmount,uint8 side,uint8 signatureType,uint256 timestamp,bytes32 metadata,bytes32 builder)";
+const ORDER_TYPE_HASH = keccak256(toHex(ORDER_TYPE_STRING));
+const DOMAIN_TYPE_HASH = keccak256(
+  toHex("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+);
+const BYTES32_ZERO = `0x${"00".repeat(32)}` as Hex;
+
+/** Order struct field list — order matters; matches ORDER_TYPE_STRING. */
+const ORDER_STRUCT = [
+  { name: "salt", type: "uint256" }, { name: "maker", type: "address" }, { name: "signer", type: "address" },
+  { name: "tokenId", type: "uint256" }, { name: "makerAmount", type: "uint256" }, { name: "takerAmount", type: "uint256" },
+  { name: "side", type: "uint8" }, { name: "signatureType", type: "uint8" }, { name: "timestamp", type: "uint256" },
+  { name: "metadata", type: "bytes32" }, { name: "builder", type: "bytes32" },
+] as const;
+
+/** The ERC-7739 TypedDataSign wrapper struct. */
+const TYPED_DATA_SIGN_STRUCT = [
+  { name: "contents", type: "Order" }, { name: "name", type: "string" }, { name: "version", type: "string" },
+  { name: "chainId", type: "uint256" }, { name: "verifyingContract", type: "address" }, { name: "salt", type: "bytes32" },
+] as const;
+
+/** The unsigned V2 Order as the deposit wallet (POLY_1271) signs it. side: 0=BUY/1=SELL. */
+export interface Poly1271Order {
+  salt: string;
+  maker: Hex; // the deposit wallet
+  signer: Hex; // == maker for POLY_1271
+  tokenId: string;
+  makerAmount: string;
+  takerAmount: string;
+  side: 0 | 1;
+  signatureType: 3;
+  timestamp: string;
+  metadata: Hex;
+  builder: Hex;
+}
+
+/** The exchange's EIP-712 domain (CTF Exchange V2 or Neg Risk). */
+export interface ExchangeDomain {
+  exchange: Hex;
+  chainId: number;
+  name: string; // "Polymarket CTF Exchange" / "Polymarket Neg Risk CTF Exchange"
+  version: string; // "2"
+}
+
+/** keccak256(abi.encode(ORDER_TYPE_HASH, ...11 order fields)) — the Order hashStruct. */
+export function poly1271ContentsHash(o: Poly1271Order): Hex {
+  return keccak256(
+    encodeAbiParameters(
+      [
+        { type: "bytes32" }, { type: "uint256" }, { type: "address" }, { type: "address" }, { type: "uint256" },
+        { type: "uint256" }, { type: "uint256" }, { type: "uint8" }, { type: "uint8" }, { type: "uint256" },
+        { type: "bytes32" }, { type: "bytes32" },
+      ],
+      [
+        ORDER_TYPE_HASH, BigInt(o.salt), o.maker, o.signer, BigInt(o.tokenId), BigInt(o.makerAmount),
+        BigInt(o.takerAmount), o.side, o.signatureType, BigInt(o.timestamp), o.metadata, o.builder,
+      ],
+    ),
+  );
+}
+
+/** The exchange's EIP-712 domain separator (appended to the packed signature). */
+export function poly1271AppDomainSep(d: ExchangeDomain): Hex {
+  return keccak256(
+    encodeAbiParameters(
+      [{ type: "bytes32" }, { type: "bytes32" }, { type: "bytes32" }, { type: "uint256" }, { type: "address" }],
+      [DOMAIN_TYPE_HASH, keccak256(toHex(d.name)), keccak256(toHex(d.version)), BigInt(d.chainId), d.exchange],
+    ),
+  );
+}
+
+/** The EIP-712 digest the EOA signs: the nested TypedDataSign over the order. */
+export function poly1271Digest(o: Poly1271Order, d: ExchangeDomain): Hex {
+  return hashTypedData({
+    domain: { name: d.name, version: d.version, chainId: d.chainId, verifyingContract: d.exchange },
+    types: { TypedDataSign: TYPED_DATA_SIGN_STRUCT, Order: ORDER_STRUCT },
+    primaryType: "TypedDataSign",
+    message: {
+      contents: {
+        salt: BigInt(o.salt), maker: o.maker, signer: o.signer, tokenId: BigInt(o.tokenId),
+        makerAmount: BigInt(o.makerAmount), takerAmount: BigInt(o.takerAmount), side: o.side,
+        signatureType: o.signatureType, timestamp: BigInt(o.timestamp), metadata: o.metadata, builder: o.builder,
+      },
+      name: "DepositWallet",
+      version: "1",
+      chainId: BigInt(d.chainId),
+      verifyingContract: o.signer, // the deposit wallet
+      salt: BYTES32_ZERO,
+    },
+  });
+}
+
+/**
+ * Build the ERC-7739-packed POLY_1271 signature for a deposit-wallet order. The EOA
+ * signs poly1271Digest() LOCALLY; the result packs innerSig(65) ++ appDomainSep(32)
+ * ++ contentsHash(32) ++ ORDER_TYPE_STRING ++ uint16(len). Byte-locked to the SDK.
+ */
+export function signPoly1271Order(args: {
+  signer: { signDigest(digest: Uint8Array): Uint8Array };
+  order: Poly1271Order;
+  domain: ExchangeDomain;
+}): Hex {
+  const { signer, order, domain } = args;
+  const innerSig = toHex(signer.signDigest(hexToBytes(poly1271Digest(order, domain)))); // 65-byte r||s||v
+  const sep = poly1271AppDomainSep(domain);
+  const contentsHash = poly1271ContentsHash(order);
+  const lenHex = ORDER_TYPE_STRING.length.toString(16).padStart(4, "0");
+  return `0x${innerSig.slice(2)}${sep.slice(2)}${contentsHash.slice(2)}${toHex(ORDER_TYPE_STRING).slice(2)}${lenHex}` as Hex;
 }
