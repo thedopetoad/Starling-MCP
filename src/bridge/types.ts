@@ -127,4 +127,16 @@ export interface Bridge {
   recover(route: BridgeRoute, flightId: string): Promise<UnsignedBridgeTx[]>;
   /** Poll provider + CONFIRM the destination effect ON-CHAIN before "ready". */
   status(flightId: string): Promise<BridgeStatus>;
+  /**
+   * Build the source leg(s) AND return the flightId to poll, in ONE step (the
+   * interface otherwise hands status()/recover() a flightId with no way to MINT
+   * it). deBridge: flightId == the DLN orderId, final. CCTP: the flightId is
+   * hash-less until the burn broadcasts — `bindLabel` names the leg whose broadcast
+   * tx hash the caller binds via bindFlight() after executing. route.recipient is
+   * pinned by the CALLER (own address / treasury), NEVER an agent argument.
+   */
+  placeOrder?(route: BridgeRoute): Promise<{ flightId: string; txs: UnsignedBridgeTx[]; bindLabel?: string }>;
+  /** Bind a broadcast leg's tx hash into the flightId (CCTP binds the burn hash;
+   *  deBridge needs none). Returns the bound flightId. */
+  bindFlight?(flightId: string, txHash: string): string;
 }

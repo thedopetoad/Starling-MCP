@@ -63,6 +63,8 @@ function makeDeps(limits: RiskLimits): ToolDeps {
     recordOpen: (n) => {
       opened = addDecimal(opened, n);
     },
+    selfAddress: () => null,
+    nativeGas: async () => 0,
   };
 }
 

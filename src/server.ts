@@ -21,6 +21,8 @@ import { makeRealVenueEnabler } from "./adapters/venue-enabler.js";
 import { DeBridgeBridge } from "./bridge/debridge.js";
 import { cctpBridge } from "./bridge/cctp.js";
 import { makeExecutor } from "./exec/executor.js";
+import { EvmRpc } from "./adapters/evm-rpc.js";
+import { SolanaRpc } from "./adapters/solana-rpc.js";
 import type { Bridge, BridgeProvider } from "./bridge/types.js";
 import type { VenueAdapter, Venue, Chain } from "./adapters/types.js";
 import {
@@ -82,7 +84,7 @@ const TOOLS = [
  *   - the in-memory IntentStore so idempotency works the moment a build exists.
  * Replace the placeholders below as Phases 1-5 deliver real implementations.
  */
-function buildToolDeps(): ToolDeps {
+export function buildToolDeps(): ToolDeps {
   const addrs = loadedAddresses();
   const venueChain: Record<string, keyof typeof addrs> = {
     polymarket: "polygon",
@@ -161,6 +163,26 @@ function buildToolDeps(): ToolDeps {
     recordOpen: (n: string) => {
       rollUsage();
       usage = { ...usage, openedNotionalUsd: addDecimal(usage.openedNotionalUsd, n) };
+    },
+    // The loaded signer's OWN address per chain — the pinned `transfer` recipient.
+    selfAddress: (chain: Chain) => {
+      const a = chain === "solana" ? addrs.solana : chain === "hyperliquid" ? addrs.hyperliquid : addrs.polygon;
+      return a ?? null;
+    },
+    // Destination native-gas balance (decimal units) for the transfer rail decision.
+    nativeGas: async (chain: Chain) => {
+      try {
+        if (chain === "solana") {
+          if (!addrs.solana) return 0;
+          return Number(await new SolanaRpc().getBalanceLamports(addrs.solana)) / 1e9;
+        }
+        const net: "polygon" | "arbitrum" = chain === "hyperliquid" ? "arbitrum" : "polygon";
+        const addr = chain === "hyperliquid" ? addrs.hyperliquid : addrs.polygon;
+        if (!addr) return 0;
+        return Number(await new EvmRpc({ net }).getBalanceWei(addr)) / 1e18;
+      } catch {
+        return 0;
+      }
     },
   };
 }

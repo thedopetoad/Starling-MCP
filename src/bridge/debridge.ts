@@ -499,6 +499,16 @@ export class DeBridgeBridge implements Bridge {
     return buildSourceOrderTxs(route.fromChain, res);
   }
 
+  /** Source leg(s) + the orderId to poll, in one call (buildBridgeIn alone drops
+   *  the orderId that status() needs). flightId == the DLN orderId — final, no bind. */
+  async placeOrder(route: BridgeRoute): Promise<{ flightId: string; txs: UnsignedBridgeTx[] }> {
+    const amount = toBaseUnits(route.amount, route.token);
+    const p = this.fundingParams(route, amount);
+    const res = await this.createOrder(p);
+    if (!res.orderId) throw new Error("deBridge create-tx returned no orderId to track.");
+    return { flightId: res.orderId, txs: buildSourceOrderTxs(route.fromChain, res) };
+  }
+
   // Outbound (return / cross-chain withdraw) is the same primitive with the
   // direction supplied by the caller via route.fromChain/toChain. recipient is
   // the sealed treasury (assertRecipientIsTreasury upstream).

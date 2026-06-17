@@ -908,6 +908,23 @@ class CctpBridge implements Bridge {
     };
   }
 
+  // ── placeOrder / bindFlight: source legs + the flightId to poll ──────────
+  async placeOrder(route: BridgeRoute): Promise<{ flightId: string; txs: UnsignedBridgeTx[]; bindLabel: string }> {
+    // Snapshot the recipient's destination balance BEFORE the burn (status()'s
+    // delta fallback), encode the hash-less flightId, build the burn legs. The
+    // caller binds the broadcast burn hash via bindFlight() before polling.
+    const preBurn = await cctpPreBurnBalance(route);
+    const flightId = flightIdForRoute(route, preBurn);
+    const txs = await this.buildBridgeIn(route);
+    return { flightId, txs, bindLabel: "depositForBurn" };
+  }
+
+  /** Bind the broadcast depositForBurn hash into the flightId so status()/recover()
+   *  can locate the Iris attestation + the mint proof. */
+  bindFlight(flightId: string, burnTxHash: string): string {
+    return bindBurnHash(flightId, burnTxHash);
+  }
+
   // ── guards ───────────────────────────────────────────────────────────────
 
   private assertUsdc(route: BridgeRoute): void {
@@ -988,6 +1005,28 @@ export async function cctpPreBurnBalance(route: BridgeRoute): Promise<string> {
   } catch {
     return "0";
   }
+}
+
+/** Reconstruct the BridgeRoute encoded in a CCTP flightId — so advance_bridge can
+ *  call recover(route, flightId) to mint without a side store. Only toChain is
+ *  load-bearing for recover(); the rest round-trips the encoded fields. */
+export function cctpFlightRoute(flightId: string): BridgeRoute {
+  const p = decodeFlightId(flightId);
+  return {
+    fromChain: cctpNetToChain(p.srcNet),
+    toChain: cctpNetToChain(p.dstNet),
+    token: "USDC",
+    amount: formatUsdc(BigInt(p.amount6dp || "0")),
+    recipient: p.recipient,
+  };
+}
+
+/** CctpNetwork -> repo Chain (reverse of toCctpNetwork). Arbitrum IS the repo's
+ *  "hyperliquid" chain; Ethereum/Solana are not transfer destinations here. */
+function cctpNetToChain(net: CctpNetwork): Chain {
+  if (net === "polygon") return "polygon";
+  if (net === "arbitrum") return "hyperliquid";
+  throw new Error(`CCTP flightId net "${net}" has no repo Chain (Ethereum/Solana not a transfer dest).`);
 }
 
 // ─── SOLANA CCTP LEG — STAGE-2 STUB ─────────────────────────────────────────

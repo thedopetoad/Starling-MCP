@@ -75,6 +75,8 @@ function makeDeps(adapter: VenueAdapter, withdrawMax: string): ToolDeps {
     recordOpen: (n) => {
       opened = addDecimal(opened, n);
     },
+    selfAddress: () => null,
+    nativeGas: async () => 0,
   };
 }
 

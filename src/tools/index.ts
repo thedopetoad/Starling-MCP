@@ -80,6 +80,7 @@ import {
   type RiskLimits,
 } from "../policy/limits.js";
 import type { Executor } from "../exec/executor.js";
+import { runTransfer, advanceBridge } from "./transfer.js";
 
 // ── result helpers ──────────────────────────────────────────────────────────
 // Matches the shape server.ts already returns: { content: [{type:"text", text}] }.
@@ -222,6 +223,12 @@ export interface ToolDeps {
   dailyUsage(): DailyUsage;
   /** Record a freshly-built open's USD notional toward the daily cap. */
   recordOpen(notionalUsd: string): void;
+  /** The loaded signer's OWN address on a chain — the pinned `transfer` recipient
+   *  (a transfer moves USDC between the user's own wallets). Never an agent arg. */
+  selfAddress(chain: Chain): string | null;
+  /** Destination native-gas balance (decimal units) for the transfer rail decision
+   *  (CCTP needs dest gas to mint; deBridge does not). */
+  nativeGas(chain: Chain): Promise<number>;
 }
 
 // ── tool schemas (merged into server.ts's TOOLS array) ───────────────────────
@@ -436,6 +443,41 @@ export const MONEY_TOOLS = [
         ...IDEMPOTENCY,
       },
       required: ["venue", "idempotencyKey"],
+    },
+  },
+  {
+    name: "transfer",
+    description:
+      "Move USDC between YOUR OWN wallets across chains, AUTO-PICKING the rail: CCTP when both " +
+      "legs are EVM and the destination holds mint-gas, else deBridge (and for any Solana leg). " +
+      "Executes the source leg(s) and returns a flightId; poll advance_bridge until delivered. " +
+      "The recipient is your own address on the destination chain — never an argument.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        fromChain: CHAIN_ENUM,
+        toChain: CHAIN_ENUM,
+        amount: { ...STR, description: "Decimal USDC to move." },
+        provider: { ...PROVIDER_ENUM, description: "Omit to auto-pick the rail (recommended)." },
+        lane: { ...LANE_ENUM, description: "CCTP finality lane; default standard." },
+        ...IDEMPOTENCY,
+      },
+      required: ["fromChain", "toChain", "amount", "idempotencyKey"],
+    },
+  },
+  {
+    name: "advance_bridge",
+    description:
+      "Drive a transfer/bridge to completion: poll the flight and, for CCTP, broadcast the mint " +
+      "(receiveMessage) once Iris attests. deBridge needs no action (the solver delivers). Call " +
+      "repeatedly until delivered=true. Reads + acts; idempotent (re-minting is a no-op).",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        provider: PROVIDER_ENUM,
+        flightId: { ...STR, description: "From the transfer result (CCTP id / deBridge orderId)." },
+      },
+      required: ["provider", "flightId"],
     },
   },
 ];
@@ -1029,6 +1071,43 @@ async function handleEnableVenue(deps: ToolDeps, a: Args): Promise<ToolText> {
   });
 }
 
+async function handleTransfer(deps: ToolDeps, a: Args): Promise<ToolText> {
+  const fromChain = reqEnum(a, "fromChain", CHAINS) as Chain;
+  const toChain = reqEnum(a, "toChain", CHAINS) as Chain;
+  const amount = reqStr(a, "amount");
+  const provider = optEnum(a, "provider", PROVIDERS);
+  const lane = optEnum(a, "lane", LANES) as CctpLane | undefined;
+  const idempotencyKey = reqStr(a, "idempotencyKey");
+  if (fromChain === toChain) throw new ArgError("fromChain and toChain must differ");
+
+  // The SOURCE chain's signer must be loaded — it signs the burn / order.
+  const guard: Venue = fromChain === "solana" ? "jupiter" : fromChain === "hyperliquid" ? "hyperliquid" : "polymarket";
+  if (!deps.signerLoaded(guard)) {
+    return fail("signer_missing", `no local signer loaded for source chain ${fromChain}; see auth_check`);
+  }
+
+  // Reserve FIRST so a replayed key can NEVER re-broadcast the source money move.
+  const { replayed } = await reserveIntent(deps, idempotencyKey, "bridge");
+  if (replayed) {
+    return ok({
+      ok: true,
+      replayed: true,
+      note:
+        "idempotencyKey already used — the transfer source was already broadcast and is NOT re-sent. " +
+        "Poll advance_bridge with the flightId from the original result, or use a NEW key.",
+    });
+  }
+  const res = await runTransfer(deps, { fromChain, toChain, amount, provider, lane });
+  return ok({ replayed: false, ...res });
+}
+
+async function handleAdvanceBridge(deps: ToolDeps, a: Args): Promise<ToolText> {
+  const provider = reqEnum(a, "provider", PROVIDERS);
+  const flightId = reqStr(a, "flightId");
+  const res = await advanceBridge(deps, { provider, flightId });
+  return ok(res);
+}
+
 // ── retry gate (exposed for the confirm/retry wiring) ────────────────────────
 // Not a tool itself, but the canonical place the retry decision is made so the
 // quota + per-intent caps live next to the builds. server.ts's retry_intent (a
@@ -1098,6 +1177,10 @@ export async function handleMoneyTool(name: string, rawArgs: unknown, deps: Tool
         return await handlePlanFundingRoute(deps, a);
       case "enable_venue":
         return await handleEnableVenue(deps, a);
+      case "transfer":
+        return await handleTransfer(deps, a);
+      case "advance_bridge":
+        return await handleAdvanceBridge(deps, a);
       default:
         return fail("unknown_tool", `unknown tool ${name}`);
     }
