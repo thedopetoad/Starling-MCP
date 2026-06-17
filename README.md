@@ -196,6 +196,25 @@ Nothing else in the server changes — that's the whole point of the layer.
 Solana key formats accepted: base58 (32-byte seed or 64-byte secret key) or hex.
 EVM: 32-byte hex, with or without `0x`.
 
+## Polymarket: bring your own builder creds
+
+Trading Polymarket V2 from a deposit wallet uses Polymarket's **relayer** (it deploys
+your deposit wallet and sets its approvals **gaslessly**) and stamps a **builder
+code** on every order. If you run your own bot, **create your OWN builder API
+credentials** from your Polymarket account (polymarket.com → Settings → Builder):
+orders attributed to your builder code earn *you* the better maker rates / rebates,
+and the credentials are what authorize the gasless relayer flow. Set them in the env:
+
+```
+STARLING_PM_BUILDER_API_KEY=…
+STARLING_PM_BUILDER_SECRET=…
+STARLING_PM_BUILDER_PASSPHRASE=…
+```
+
+These are HMAC secrets — keep them out of the repo (the `.gitignore` already blocks
+`.env*`; put them in your `env`-source file or secrets manager). Without your own,
+you forgo the attribution **and** the better economics.
+
 ## Tools
 
 See [What the agent can do](#what-the-agent-can-do) for the prompt-driven list.
