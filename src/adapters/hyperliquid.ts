@@ -29,7 +29,7 @@ import type {
   SubmitResult,
 } from "./types.js";
 import { getEvmSigner } from "../signers/index.js";
-import { signL1Action } from "./hl-signing.js";
+import { signL1Action, signWithdraw } from "./hl-signing.js";
 import { HL_MAINNET, HL_TESTNET, infoPost, postExchange } from "./hl-transport.js";
 
 const PERP_MAX_DECIMALS = 6;
@@ -133,6 +133,26 @@ export class HyperliquidAdapter implements VenueAdapter {
       { action: build.action, nonce: build.nonce, signature: build.signature, vaultAddress: null },
       { host: this.host, fetchImpl: this.fetchImpl },
     );
+  }
+
+  /**
+   * Withdraw USDC from HyperCore to the SAME address on Arbitrum (HL's native
+   * off-ramp). User-signed action (not an L1 order). HL deducts a $1 fee; funds
+   * land on Arbitrum in ~5 min. destination defaults to the signer's own address
+   * (HL only releases to the account owner's address). Returns posted:true when
+   * HL accepts the signed withdraw.
+   */
+  async withdraw(amount: string, destination?: string): Promise<SubmitResult> {
+    const signer = getEvmSigner("hyperliquid");
+    const dest = destination ?? signer.address;
+    const { action, signature, nonce } = signWithdraw({
+      signer,
+      destination: dest,
+      amount,
+      time: Date.now(),
+      isMainnet: this.isMainnet,
+    });
+    return postExchange({ action: action as unknown as Record<string, unknown>, nonce, signature, vaultAddress: null }, { host: this.host, fetchImpl: this.fetchImpl });
   }
 
   // ── internals ──────────────────────────────────────────────────────────────

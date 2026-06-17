@@ -95,6 +95,61 @@ export function signL1Action(args: {
   };
 }
 
+// ── USER-SIGNED actions (withdraw, usdSend, …) ──────────────────────────────
+// A DIFFERENT scheme from L1 actions: instead of the phantom-agent "Exchange"
+// domain (chainId 1337) over a msgpack hash, user-signed actions sign the action
+// fields DIRECTLY as EIP-712 typed data under the "HyperliquidSignTransaction"
+// domain on the REAL signatureChainId (Arbitrum 42161 mainnet / 421614 testnet).
+// The signed struct excludes `type`/`signatureChainId` (those ride in the action
+// JSON but not the typed-data). nonce == the action's `time` (ms). Confirmed
+// against the @nktkas/hyperliquid SDK + HL docs.
+const WITHDRAW_TYPES = {
+  "HyperliquidTransaction:Withdraw": [
+    { name: "hyperliquidChain", type: "string" },
+    { name: "destination", type: "string" },
+    { name: "amount", type: "string" },
+    { name: "time", type: "uint64" },
+  ],
+} as const;
+
+export interface HlWithdrawAction {
+  type: "withdraw3";
+  hyperliquidChain: "Mainnet" | "Testnet";
+  signatureChainId: `0x${string}`;
+  destination: string;
+  amount: string;
+  time: number;
+}
+
+/** Build + sign a USDC withdrawal from HyperCore to the same address on Arbitrum.
+ *  Returns the action (POST verbatim) + its signature + nonce (== time). The
+ *  destination is lower-cased (HL hashes the lower-case string). A $1 fee is
+ *  deducted by HL; amount is the gross withdrawal in USDC (decimal string). */
+export function signWithdraw(args: {
+  signer: EvmSigner;
+  destination: string;
+  amount: string;
+  time: number;
+  isMainnet: boolean;
+}): { action: HlWithdrawAction; signature: RsvSignature; nonce: number } {
+  const destination = args.destination.toLowerCase();
+  const signatureChainId: `0x${string}` = args.isMainnet ? "0xa4b1" : "0x66eee"; // 42161 / 421614
+  const chainId = args.isMainnet ? 42161 : 421614;
+  const hyperliquidChain = args.isMainnet ? "Mainnet" : "Testnet";
+  const digest = hashTypedData({
+    domain: { name: "HyperliquidSignTransaction", version: "1", chainId, verifyingContract: "0x0000000000000000000000000000000000000000" },
+    types: WITHDRAW_TYPES,
+    primaryType: "HyperliquidTransaction:Withdraw",
+    message: { hyperliquidChain, destination, amount: args.amount, time: BigInt(args.time) },
+  });
+  const rsv = args.signer.signDigest(hexToBytes(digest));
+  return {
+    action: { type: "withdraw3", hyperliquidChain, signatureChainId, destination, amount: args.amount, time: args.time },
+    signature: { r: `0x${toHex(rsv.subarray(0, 32))}`, s: `0x${toHex(rsv.subarray(32, 64))}`, v: rsv[64] },
+    nonce: args.time,
+  };
+}
+
 // ── byte helpers ─────────────────────────────────────────────────────────────
 
 /** nonce is a ms timestamp — well within the 53-bit safe-integer range. */
