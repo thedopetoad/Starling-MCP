@@ -17,9 +17,12 @@ process.env.STARLING_NETWORK = process.env.STARLING_NETWORK || "mainnet";
 process.env.STARLING_RPC_POLYGON = process.env.STARLING_RPC_POLYGON || "https://polygon-bor-rpc.publicnode.com";
 process.env.STARLING_RPC_ARBITRUM = process.env.STARLING_RPC_ARBITRUM || "https://arb1.arbitrum.io/rpc";
 
-import { bootUnlock, loadedAddresses } from "../dist/signers/index.js";
-import { buildToolDeps } from "../dist/server.js";
-import { handleMoneyTool, MONEY_TOOLS } from "../dist/tools/index.js";
+// DYNAMIC import (after the env block above) — static `import` is hoisted ABOVE the
+// env assignments, so module singletons that read env at construction (the
+// Hyperliquid adapter reads STARLING_NETWORK then) would capture the wrong network.
+const { bootUnlock, loadedAddresses } = await import("../dist/signers/index.js");
+const { buildToolDeps } = await import("../dist/server.js");
+const { handleMoneyTool, MONEY_TOOLS } = await import("../dist/tools/index.js");
 
 const stage = process.argv[2];
 const a = process.argv.slice(3).filter((x) => !x.startsWith("--"));
@@ -85,6 +88,22 @@ const stages = {
     console.log(`build_withdraw(hyperliquid) ${amt} USDC -> own Arbitrum address`);
     if (!LIVE) return console.log("DRY — re-run with --live. (Needs STARLING_WITHDRAW_MAX set.)");
     show(await call("build_withdraw", { chain: "hyperliquid", amount: amt, idempotencyKey: key("hlw") }));
+  },
+  async "hl-trade"() {
+    const coin = (a[0] || "SOL").toUpperCase();
+    const usd = a[1] || "11";
+    const q = await call("get_quote", { venue: "hyperliquid", marketId: "hl:" + coin });
+    const mid = Number(q?.meta?.mid);
+    if (!mid) return console.log("no HL mid:", JSON.stringify(q, null, 2));
+    const worstBuy = Number((mid * 1.01).toPrecision(5));
+    console.log(`HL ${coin}: mid=${mid} | open $${usd} IOC-buy worst=${worstBuy}`);
+    if (!LIVE) return console.log("DRY — --live to trade.");
+    console.log("\n>>> OPEN (hyperliquid) <<<");
+    show(await call("open_position", { venue: "hyperliquid", marketId: "hl:" + coin, side: "buy", amount: usd, amountKind: "collateral", worstPrice: String(worstBuy), idempotencyKey: key("hl-open") }));
+    await new Promise((r) => setTimeout(r, 4000)); // let HL reflect the fill before closing
+    console.log("\n>>> CLOSE (hyperliquid) <<<");
+    const worstSell = Number((mid * 0.99).toPrecision(5));
+    show(await call("close_position", { venue: "hyperliquid", marketId: "hl:" + coin, fraction: "1", worstPrice: String(worstSell), idempotencyKey: key("hl-close") }));
   },
 };
 
