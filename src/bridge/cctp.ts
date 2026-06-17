@@ -354,8 +354,16 @@ async function fetchFastFeeBps(
         "Use the Standard lane (free) or retry.",
     );
   }
-  const json = (await res.json()) as { minimumFee?: number };
-  const bps = json.minimumFee;
+  // Iris now returns an ARRAY (one entry per finalityThreshold: 1000=Fast,
+  // 2000=Standard); the older shape was a bare { minimumFee } object. Handle both
+  // — pick the Fast (1000) entry. minimumFee may legitimately be 0 (free corridor);
+  // fastMaxFee floors the resulting maxFee to 1 base unit (Circle wants it > 0).
+  const json = (await res.json()) as
+    | { minimumFee?: number }
+    | Array<{ finalityThreshold?: number; minimumFee?: number }>;
+  const bps = Array.isArray(json)
+    ? (json.find((e) => e.finalityThreshold === FINALITY.fast) ?? json[0])?.minimumFee
+    : json.minimumFee;
   if (typeof bps !== "number" || !Number.isFinite(bps) || bps < 0) {
     throw new Error(
       `CCTP: Iris returned an invalid Fast-fee (${JSON.stringify(json)}) for ` +
