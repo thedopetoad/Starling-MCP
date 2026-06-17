@@ -31,9 +31,16 @@ const EVM_CHAINS: ReadonlySet<Chain> = new Set<Chain>(["polygon", "hyperliquid"]
 
 /** Native-gas floor the destination needs to pay the CCTP receiveMessage mint.
  *  Below it, CCTP can't complete on the dest, so deBridge (solver-delivered, no
- *  dest gas) is the correct rail. POL on Polygon, ETH on Arbitrum. */
+ *  dest gas) is the correct rail. POL on Polygon, ETH on Arbitrum.
+ *
+ *  NOTE (from live testing): this is a heuristic — the real mint cost tracks the
+ *  live gas PRICE, which a static balance floor can't capture. A Polygon gas spike
+ *  (~1000 gwei) pushed a receiveMessage to ~0.148 POL and stranded a mint when the
+ *  floor was 0.1; the EVM broadcaster failed CLOSED (node rejected the tx, no funds
+ *  lost, burn remains mintable). Polygon's floor is set conservatively HIGH so the
+ *  router prefers deBridge (which needs no dest gas) when Polygon gas is marginal. */
 export function destGasFloor(toChain: Chain): number {
-  return toChain === "polygon" ? 0.1 : 0.0003;
+  return toChain === "polygon" ? 0.2 : 0.0003;
 }
 
 /** PURE rail decision. CCTP when both legs are EVM AND the dest holds enough native
