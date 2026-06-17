@@ -8,11 +8,16 @@
 //
 // THREE LOAD-BEARING INVARIANTS (the reason this file exists as a chokepoint):
 //
-//   1. UNSIGNED-ONLY. Every tool returns a build artifact (BuildResult /
-//      UnsignedBridgeTx[] / a withdraw plan). The signer lives in the same
-//      process but is invoked by the CALLER after it inspects the artifact, not
-//      by these tools. So the worst a buggy/rogue *argument* can do is shape a
-//      build; it cannot move funds through this surface.
+//   1. EXECUTION IS GATED, NOT FREE. Off-chain order venues (PM CLOB / HL
+//      exchange) locally sign + POST the order INSIDE the tool (open / close /
+//      the HL native withdraw) — but only AFTER the policy caps, the worst-price
+//      bound, the idempotency store, and (for withdraw) the per-call cap have all
+//      passed. On-chain tx builds (bridge / gas / EVM-or-Solana sweep) are still
+//      returned UNSIGNED for the executor to sign + broadcast under
+//      inspect-before-sign. Either way a buggy/rogue *argument* can only shape a
+//      build within those gates: it cannot redirect funds (recipients are pinned
+//      server-side — the sealed treasury, or, for the HL withdraw, the owner's own
+//      address pinned by HL) nor exceed the caps.
 //
 //   2. IDEMPOTENT MONEY MOVES. Every money-moving tool REQUIRES an
 //      idempotencyKey and goes through IntentStore.upsert FIRST. On a replayed
@@ -62,6 +67,7 @@ import {
   type Reconciler,
 } from "../intents/store.js";
 import {
+  cmpDecimal,
   resolveWithdrawRecipient,
   type ResolvedWithdraw,
   type SealedTreasury,
@@ -682,15 +688,37 @@ async function handleClosePosition(deps: ToolDeps, a: Args): Promise<ToolText> {
     () => adapter.buildClose(intent),
   );
 
+  // Off-chain order books (PM CLOB / HL exchange) expose submit() — POST the
+  // locally-signed close NOW, mirroring open_position. Without this a tool-driven
+  // close would build a signed order and never post it, so the position never
+  // closes. Venues whose build is an on-chain tx have no submit() and return the
+  // build for the caller to broadcast.
+  let submit: SubmitResult | undefined;
+  if (!res.replayed && res.build && adapter.submit) {
+    submit = await adapter.submit(res.build);
+    await deps.store.patch(deps.botId, intent.idempotencyKey, {
+      state: submit.posted ? "FILLED" : "FAILED",
+      txHashes: submit.txHashes ?? [],
+      error: submit.posted
+        ? undefined
+        : { code: "no_liquidity", message: submit.error ?? "close order rejected", recoverable: true, suggestedAction: "re-quote and retry with the same idempotencyKey" },
+    });
+  }
+
   return ok({
-    ok: true,
+    ok: submit ? submit.posted : true,
     replayed: res.replayed,
-    state: res.record.state,
+    state: submit ? (submit.posted ? "FILLED" : "FAILED") : res.record.state,
     intent: { venue, marketId: intent.marketId, fraction: intent.fraction },
+    submit,
     build: res.build,
     note: res.replayed
-      ? "idempotencyKey already used — returning the ORIGINAL build."
-      : "UNSIGNED close build. Sign with the local key, reconcile, then broadcast.",
+      ? "idempotencyKey already used — returning the ORIGINAL result, not a new close."
+      : submit
+        ? submit.posted
+          ? "Close POSTed to the venue (locally signed, bounded by worstPrice)."
+          : `Close rejected: ${submit.error}`
+        : "UNSIGNED close build. Sign with the local key, reconcile, then broadcast.",
   });
 }
 
@@ -742,6 +770,48 @@ async function handleBuildWithdraw(deps: ToolDeps, a: Args): Promise<ToolText> {
   const guardVenue: Venue = chain === "solana" ? "jupiter" : chain === "hyperliquid" ? "hyperliquid" : "polymarket";
   if (!deps.signerLoaded(guardVenue)) {
     return fail("signer_missing", `no local signer loaded for chain ${chain}; see auth_check`);
+  }
+
+  // Hyperliquid has a NATIVE off-ramp: a user-signed withdraw3 that HL releases
+  // ONLY to the account owner's own address (recipient pinned by HL — not the
+  // sealed treasury, not an argument). So it does NOT route through the
+  // treasury-sweep path below; we still enforce the per-call cap, then EXECUTE it
+  // via the adapter (it POSTs to /exchange like an order). $1 flat HL fee, ~5 min
+  // to land. Reserve the intent FIRST so a replayed key can never post twice.
+  if (chain === "hyperliquid") {
+    const cap = deps.withdrawMaxPerCall(chain);
+    if (cmpDecimal(amount, cap) > 0) {
+      return fail("treasury_refused", `Withdraw amount ${amount} exceeds the per-call cap ${cap}. Set STARLING_WITHDRAW_MAX.`, {
+        withdrawCode: "amount_exceeds_cap",
+      });
+    }
+    const adapter = getAdapter(deps, "hyperliquid");
+    if (!adapter.withdraw) return fail("internal", "hyperliquid adapter exposes no withdraw()");
+
+    const { replayed } = await reserveIntent(deps, idempotencyKey, "withdraw");
+    if (replayed) {
+      return ok({
+        ok: true,
+        replayed: true,
+        chain,
+        note:
+          "idempotencyKey already used — the HL withdraw was already submitted and is NOT re-posted on " +
+          "replay (no double-withdraw). Check your Arbitrum balance; use a NEW key to withdraw again.",
+      });
+    }
+    const res = await adapter.withdraw(amount);
+    await deps.store.patch(deps.botId, idempotencyKey, { state: res.posted ? "FILLED" : "FAILED" });
+    return ok({
+      ok: res.posted,
+      replayed: false,
+      chain,
+      amount,
+      submit: res,
+      note: res.posted
+        ? "HL withdraw3 accepted — USDC lands at your OWN address on Arbitrum in ~5 min (HL deducts a $1 " +
+          "flat fee). The recipient is pinned by HL to the account owner, not an argument."
+        : `HL rejected the withdraw: ${res.error ?? "unknown"}. Verify funds, then retry with a NEW idempotencyKey.`,
+    });
   }
 
   let resolved: ResolvedWithdraw;

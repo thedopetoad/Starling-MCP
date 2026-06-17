@@ -155,4 +155,14 @@ export interface VenueAdapter {
    * by the risk caps and bounded by the order's own worst price.
    */
   submit?(build: BuildResult): Promise<SubmitResult>;
+  /**
+   * Withdraw collateral OFF the venue to the account OWNER's own address
+   * (Hyperliquid: a user-signed withdraw3 that lands USDC at the same address on
+   * Arbitrum, minus HL's $1 flat fee). Present only for venues with a native
+   * off-ramp; the recipient is pinned by the VENUE to the owner — never an
+   * argument. Gated upstream by the per-call withdraw cap. Absent for venues whose
+   * "withdraw" is a plain on-chain sweep (those go through build_withdraw → the
+   * sealed treasury instead).
+   */
+  withdraw?(amount: string, destination?: string): Promise<SubmitResult>;
 }
