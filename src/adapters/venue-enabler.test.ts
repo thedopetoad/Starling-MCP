@@ -8,6 +8,9 @@ import { makeRealVenueEnabler } from "./venue-enabler.js";
 
 process.env.STARLING_KEY_SOURCE = "env";
 process.env.STARLING_PK_POLYGON = "0x0000000000000000000000000000000000000000000000000000000000000001";
+// These cases exercise the LEGACY bare-EOA enable path (unsigned approval txs). The
+// default is now deposit-wallet mode (gasless relayer); see the DW-mode case below.
+process.env.STARLING_PM_DEPOSIT_WALLET = "false";
 await bootUnlock();
 
 const enabler = makeRealVenueEnabler();
@@ -48,6 +51,19 @@ test("polymarket with a wrap prepends the USDC.e approve + wrap pair", async () 
   assert.equal(r.txs[0].label, "approve-usdce-onramp");
   assert.equal(r.txs[1].label, "wrap-usdce-to-pusd");
   delete process.env.STARLING_PM_WRAP_USDCE;
+});
+
+test("polymarket DEPOSIT-WALLET mode without builder creds refuses with a clear blocker", async () => {
+  delete process.env.STARLING_PM_DEPOSIT_WALLET; // default = deposit-wallet mode
+  delete process.env.STARLING_PM_BUILDER_API_KEY;
+  delete process.env.STARLING_PM_BUILDER_SECRET;
+  delete process.env.STARLING_PM_BUILDER_PASSPHRASE;
+  const r = await enabler.enable("polymarket");
+  assert.equal(r.txs.length, 0);
+  assert.equal(r.alreadyEnabled, false);
+  assert.match(r.blockers.join(" "), /builder creds/);
+  assert.match(r.note ?? "", /STARLING_PM_BUILDER_API_KEY/);
+  process.env.STARLING_PM_DEPOSIT_WALLET = "false"; // restore for any later cases
 });
 
 test("hyperliquid reports already-enabled (no approval txs)", async () => {

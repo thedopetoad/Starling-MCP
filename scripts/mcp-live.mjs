@@ -59,6 +59,11 @@ const stages = {
       show(gasReserveStatus(c, await deps.nativeGas(c).catch(() => 0)));
     }
   },
+  // enable_venue through the MCP — for PM this drives the gasless relayer to
+  // deploy + approve the deposit wallet (idempotent: reports already-done).
+  async enable() {
+    show(await call("enable_venue", { venue: a[0] || "polymarket", idempotencyKey: key("enable") }));
+  },
   // DRY-build a Polymarket order through the ADAPTER (no post) and prove it's a
   // deposit-wallet order: maker == the derived DW, signatureType 3, ERC-7739 sig.
   async ["pm-build"]() {

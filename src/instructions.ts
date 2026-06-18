@@ -40,11 +40,15 @@ back UNSIGNED txs you broadcast.
   solver delivers). Fully executed across both phases — the recommended way to bridge.
 - **build_withdraw(chain=hyperliquid)** — I execute HL's native withdraw3 to your OWN
   Arbitrum address (~5 min, $1 flat HL fee). Fully executed.
-- **build_bridge / ensure_gas / enable_venue / plan_funding_route /
-  build_withdraw(chain=polygon|solana)** — lower-level builders: I return UNSIGNED
-  txs (recipients PINNED by me, never your argument) for you to sign + broadcast.
-  Prefer 'transfer' for plain cross-chain USDC; these are for bespoke flows. The
-  reference harness 'scripts/live.mjs' shows the broadcast pattern.
+- **enable_venue(polymarket)** — EXECUTES the one-time deposit-wallet setup GASLESSLY
+  via Polymarket's relayer: deploys your per-user deposit wallet + approves the V2
+  exchanges to spend its pUSD/outcome-tokens. Idempotent (skips what's already done),
+  nothing for you to broadcast. Needs the builder creds (STARLING_PM_BUILDER_*).
+- **build_bridge / ensure_gas / plan_funding_route / build_withdraw(chain=polygon|
+  solana)** — lower-level builders: I return UNSIGNED txs (recipients PINNED by me,
+  never your argument) for you to sign + broadcast. Prefer 'transfer' for plain
+  cross-chain USDC; these are for bespoke flows. The reference harness
+  'scripts/live.mjs' shows the broadcast pattern.
 
 ## Non-negotiable rules
 - **Every order needs a worst price.** There is no market order — slippage is
@@ -80,14 +84,12 @@ open_position checks the caps BEFORE building, so a blocked trade never signs.
 - **Polymarket** (prediction markets, Polygon) — LIVE end to end: open_position /
   close_position build + locally sign a V2 DEPOSIT-WALLET order (signatureType 3,
   ERC-7739) whose maker is the EOA's derived deposit wallet, then POST it. A real
-  fill has settled on-chain (tx 0x717c83b0…). ONE-TIME setup per wallet before its
-  first order can settle: the deposit wallet must be (1) DEPLOYED + (2) APPROVED to
-  let the exchanges spend its pUSD/outcome-tokens + (3) FUNDED with pUSD. The deploy
-  + on-DW approvals run through Polymarket's gasless relayer (needs the builder
-  creds — STARLING_PM_BUILDER_API_KEY/_SECRET/_PASSPHRASE); the funding is a wrap of
-  USDC.e -> pUSD to the deposit wallet. (This setup is being folded into enable_venue;
-  until then it's a pre-step.) Set STARLING_PM_DEPOSIT_WALLET=false only for a
-  pre-registered bare-EOA/proxy.
+  fill has settled on-chain (tx 0x717c83b0…). ONE-TIME setup per wallet: call
+  **enable_venue(polymarket)** — it gaslessly DEPLOYS your deposit wallet + APPROVES
+  the V2 exchanges via the relayer (needs the builder creds STARLING_PM_BUILDER_API_KEY
+  /_SECRET/_PASSPHRASE; idempotent). Then FUND the deposit wallet with pUSD (wrap
+  USDC.e -> pUSD to that address) and open_position settles. Set
+  STARLING_PM_DEPOSIT_WALLET=false only for a pre-registered bare-EOA/proxy.
 
 ## Funding & gas (WIRED — 'transfer'/'advance_bridge' EXECUTE; build_* are lower-level)
 - **CCTP** — the ~1:1 USDC rail between EVM chains (Polygon <-> Arbitrum). Needs
