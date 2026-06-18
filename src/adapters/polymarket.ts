@@ -53,8 +53,10 @@ import {
   SIDE_BUY,
   SIDE_SELL,
   SIGNATURE_TYPE_EOA,
+  SIGNATURE_TYPE_POLY_1271,
   type TickSize,
 } from "./polymarket-constants.js";
+import { deriveDepositWalletUUPS, signPoly1271Order } from "./polymarket-deposit-wallet.js";
 import {
   fetchTickSize,
   fetchNegRisk,
@@ -103,13 +105,20 @@ export class PolymarketAdapter implements VenueAdapter {
   private readonly fetchImpl: typeof fetch;
   /** Optional builder code (bytes32) attached to every order for attribution. */
   private readonly builderCode: `0x${string}`;
+  /** Deposit-wallet mode: build POLY_1271 (sigType 3) orders from the EOA's
+   *  derived deposit wallet. The V2 CLOB rejects bare-EOA orders from fresh
+   *  self-custodied wallets, so this is the DEFAULT; set STARLING_PM_DEPOSIT_WALLET
+   *  =false/0 only to force the legacy EOA path (e.g. a pre-registered proxy). */
+  private readonly depositWallet: boolean;
   private readonly resolveCache = new Map<string, ResolvedMarket>();
 
-  constructor(opts: { clobHost?: string; fetchImpl?: typeof fetch; builderCode?: string } = {}) {
+  constructor(opts: { clobHost?: string; fetchImpl?: typeof fetch; builderCode?: string; depositWallet?: boolean } = {}) {
     this.clobHost = opts.clobHost ?? CLOB_HOST;
     this.fetchImpl = opts.fetchImpl ?? fetch;
     const code = opts.builderCode ?? process.env.STARLING_PM_BUILDER_CODE ?? "";
     this.builderCode = normalizeBytes32(code);
+    const flag = (process.env.STARLING_PM_DEPOSIT_WALLET ?? "").trim().toLowerCase();
+    this.depositWallet = opts.depositWallet ?? !(flag === "false" || flag === "0" || flag === "off");
   }
 
   async health(): Promise<{ up: boolean; orderModel: "eip712Order"; note?: string }> {
@@ -268,7 +277,12 @@ export class PolymarketAdapter implements VenueAdapter {
   }): Eip712OrderResult {
     const { market, side, amount, worstPrice } = args;
     const signer = getEvmSigner("polymarket");
-    const maker = signer.address;
+    const eoa = signer.address as `0x${string}`;
+    // DW mode: maker == signer == the EOA's derived deposit wallet, sigType 3.
+    // EOA mode (legacy): maker == signer == the bare EOA, sigType 0.
+    const useDW = this.depositWallet;
+    const maker = useDW ? deriveDepositWalletUUPS(eoa) : eoa;
+    const signatureType = useDW ? SIGNATURE_TYPE_POLY_1271 : SIGNATURE_TYPE_EOA;
 
     const price = priceCheck(worstPrice, market.tickSize);
     const { makerAmount, takerAmount } = computeAmounts(side, amount, price, market.tickSize);
@@ -282,21 +296,6 @@ export class PolymarketAdapter implements VenueAdapter {
     const timestamp = Date.now().toString(); // ms — per-address uniqueness, NOT expiry
     const sideUint = side === "buy" ? SIDE_BUY : SIDE_SELL;
 
-    // The struct fields exactly as signed (uint256/address/bytes32 as strings).
-    const message = {
-      salt: BigInt(salt),
-      maker,
-      signer: maker, // EOA: signer == maker
-      tokenId: BigInt(market.tokenId),
-      makerAmount: BigInt(makerAmount),
-      takerAmount: BigInt(takerAmount),
-      side: sideUint,
-      signatureType: SIGNATURE_TYPE_EOA,
-      timestamp: BigInt(timestamp),
-      metadata: BYTES32_ZERO,
-      builder: this.builderCode,
-    } as const;
-
     const domain: TypedDataDomain = {
       name: domainName,
       version: EIP712_DOMAIN_VERSION,
@@ -304,14 +303,50 @@ export class PolymarketAdapter implements VenueAdapter {
       verifyingContract,
     };
 
-    // Hash the typed data with viem, sign the 32-byte digest with the local key.
-    const digest = hashTypedData({
-      domain,
-      types: ORDER_EIP712_TYPES,
-      primaryType: "Order",
-      message,
-    });
-    const signature = signOrderDigest(signer, digest);
+    let signature: `0x${string}`;
+    let typedData: unknown;
+    if (useDW) {
+      // Deposit wallet (ERC-1271): the signature is the ERC-7739 nested
+      // TypedDataSign blob, NOT a plain EIP-712 digest sig. signPoly1271Order is
+      // vector-locked to the V2 SDK and live-proven (fill settled, 0x717c83b0…).
+      const order = {
+        salt,
+        maker,
+        signer: maker,
+        tokenId: market.tokenId,
+        makerAmount,
+        takerAmount,
+        side: sideUint as 0 | 1,
+        signatureType: SIGNATURE_TYPE_POLY_1271 as 3,
+        timestamp,
+        metadata: BYTES32_ZERO,
+        builder: this.builderCode,
+      };
+      signature = signPoly1271Order({
+        signer,
+        order,
+        domain: { exchange: verifyingContract, chainId: POLYGON_CHAIN_ID, name: domainName, version: EIP712_DOMAIN_VERSION },
+      });
+      typedData = { mode: "poly1271", domain, order };
+    } else {
+      // EOA (signatureType 0): a plain EIP-712 Order digest signed by the local key.
+      const message = {
+        salt: BigInt(salt),
+        maker,
+        signer: maker,
+        tokenId: BigInt(market.tokenId),
+        makerAmount: BigInt(makerAmount),
+        takerAmount: BigInt(takerAmount),
+        side: sideUint,
+        signatureType: SIGNATURE_TYPE_EOA,
+        timestamp: BigInt(timestamp),
+        metadata: BYTES32_ZERO,
+        builder: this.builderCode,
+      } as const;
+      const digest = hashTypedData({ domain, types: ORDER_EIP712_TYPES, primaryType: "Order", message });
+      signature = signOrderDigest(signer, digest);
+      typedData = { domain, types: ORDER_EIP712_TYPES, primaryType: "Order", message: serializeMessage(message) };
+    }
 
     // Wire-shape inner order (numbers/strings as the CLOB expects on POST /order).
     // `side` on the wire is the STRING "BUY"/"SELL"; the uint8 is only in the
@@ -326,7 +361,7 @@ export class PolymarketAdapter implements VenueAdapter {
       makerAmount,
       takerAmount,
       side: side === "buy" ? "BUY" : "SELL",
-      signatureType: SIGNATURE_TYPE_EOA,
+      signatureType,
       timestamp,
       expiration: "0",
       metadata: BYTES32_ZERO,
@@ -341,7 +376,7 @@ export class PolymarketAdapter implements VenueAdapter {
       negRisk: market.negRisk,
       tickSize: market.tickSize,
       // Carry the typed-data so a caller/test can re-derive the digest.
-      typedData: { domain, types: ORDER_EIP712_TYPES, primaryType: "Order", message: serializeMessage(message) },
+      typedData,
       orderStruct,
       postUrl: `${this.clobHost}/order`,
     };

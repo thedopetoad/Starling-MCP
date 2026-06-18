@@ -59,6 +59,18 @@ const stages = {
       show(gasReserveStatus(c, await deps.nativeGas(c).catch(() => 0)));
     }
   },
+  // DRY-build a Polymarket order through the ADAPTER (no post) and prove it's a
+  // deposit-wallet order: maker == the derived DW, signatureType 3, ERC-7739 sig.
+  async ["pm-build"]() {
+    const { polymarketAdapter } = await import("../dist/adapters/polymarket.js");
+    const { deriveDepositWalletUUPS } = await import("../dist/adapters/polymarket-deposit-wallet.js");
+    const DW = deriveDepositWalletUUPS(A.polygon);
+    const ms = await fetch("https://gamma-api.polymarket.com/markets?closed=false&active=true&limit=40&order=volume24hr&ascending=false").then((r) => r.json());
+    let token;
+    for (const m of ms) { if (m.negRisk || m.enableOrderBook === false) continue; let ids; try { ids = JSON.parse(m.clobTokenIds); } catch { continue; } if (ids?.[0]) { token = ids[0]; break; } }
+    const build = await polymarketAdapter.buildOpen({ venue: "polymarket", marketId: "pm:" + token, side: "buy", amount: "1.2", amountKind: "collateral", worstPrice: "0.5", idempotencyKey: "pmbuild" });
+    show({ eoa: A.polygon, depositWallet: DW, orderMaker: build.orderStruct.maker, makerIsDW: build.orderStruct.maker === DW, orderSigner: build.orderStruct.signer, signatureType: build.orderStruct.signatureType, sigChars: build.orderStruct.signature.length });
+  },
   async quote() {
     show(await call("get_quote", { venue: a[0], marketId: a[1], side: a[2] }));
   },

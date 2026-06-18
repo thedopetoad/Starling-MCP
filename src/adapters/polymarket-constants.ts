@@ -104,5 +104,12 @@ export const ROUNDING_CONFIG: Record<TickSize, { price: number; size: number; am
 export const SIDE_BUY = 0;
 export const SIDE_SELL = 1;
 
-/** signatureType=0 EOA. We trade on plain EOAs; signer == maker == local EOA. */
+/** signatureType=0 EOA. signer == maker == local EOA. */
 export const SIGNATURE_TYPE_EOA = 0;
+
+/** signatureType=3 POLY_1271. The V2 CLOB requires a registered per-user DEPOSIT
+ *  WALLET (an ERC-1271 contract) for a fresh self-custodied EOA — a bare EOA order
+ *  is rejected. maker == signer == the deposit wallet; the signature is the
+ *  ERC-7739 nested TypedDataSign blob from signPoly1271Order (live-proven: a real
+ *  fill settled on-chain, tx 0x717c83b0…). */
+export const SIGNATURE_TYPE_POLY_1271 = 3;
