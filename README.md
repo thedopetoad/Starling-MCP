@@ -134,10 +134,17 @@ github:thedopetoad/Starling-MCP` and call `tools/list`.
 > than 60k"* map straight to that limit; if you don't pin one, a default
 > slippage fraction derives it from the quote.
 
-> **Withdraws can only go to your treasury.** The withdraw tool takes **no
-> recipient argument** — "send to address X" is not an expressible capability.
-> See [Security invariants](#security-invariants) and the threat model for the
-> honest ceiling on that guarantee.
+> **Withdraws can only go to a destination YOU set.** The withdraw tool takes **no
+> recipient argument** — "send to address X" is not an expressible capability. The
+> destination is read from one of two human-set sources: the treasury **sealed** at
+> wallet setup, or an address you **pasted into the Starling dashboard**
+> (`set-treasury`), stored in `~/.starling/treasury.json`. The agent can *read* the
+> destination (`request_withdraw_address`) and route you to the dashboard, but it
+> can never set or change it — so it never re-types your 40/44-char address into a
+> config and corrupts a character. Inbound *funding* recipients stay **keystore-only**
+> (a dashboard pin is withdraw-only). See [Security invariants](#security-invariants)
+> for the honest ceiling — the file is UX + transcription integrity, not a crypto
+> control against a code-exec'd agent.
 
 ## Reference harness (the worked lifecycle)
 
@@ -265,6 +272,13 @@ starling-mcp doctor     hygiene checks (Node, key source, perms, NEXT_PUBLIC lea
 3. `STARLING_KEY` gates only metered hosted analytics — never the signing path.
 4. Decrypted secrets live in `Buffer`s and are zeroized after a signer captures
    them (best-effort; not a guarantee against a live memory dump).
+5. Withdraw destinations are human-set only — the keystore-sealed treasury
+   (AAD-bound, tamper-evident) and/or the dashboard-pinned `~/.starling/treasury.json`
+   (a human paste; UX + transcription integrity, **not** crypto-tamper-resistant —
+   a code-exec'd agent can rewrite it, same honest ceiling as the sealed treasury).
+   A keystore/dashboard disagreement fails **closed** (`treasury_conflict`). Inbound
+   funding recipients accept the keystore source only; the dashboard pin is
+   withdraw-only, so it can never silently become an inbound-funds recipient.
 
 Built on the official [MCP TypeScript SDK](https://www.npmjs.com/package/@modelcontextprotocol/sdk).
 Shares `src/keystore/crypto.ts` + a frozen decryption vector with the wallet tool

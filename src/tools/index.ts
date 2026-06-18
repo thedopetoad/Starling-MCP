@@ -67,6 +67,8 @@ import {
   type Reconciler,
 } from "../intents/store.js";
 import {
+  canWithdraw,
+  chainSource,
   cmpDecimal,
   resolveWithdrawRecipient,
   type ResolvedWithdraw,
@@ -963,17 +965,35 @@ async function handleBuildBridge(deps: ToolDeps, a: Args): Promise<ToolText> {
   const fromChain = reqEnum(a, "fromChain", CHAINS) as Chain;
   const toChain = reqEnum(a, "toChain", CHAINS) as Chain;
 
-  // Recipient is pinned by the MCP, NEVER from an agent argument:
-  //  - direction "out" (withdraw): the sealed treasury for toChain.
-  //  - direction "in"  (funding):  also resolved server-side (treasury / thin-wallet).
-  // We read it from the sealed treasury here; an allowlisted thin-wallet getter
-  // can be substituted in ToolDeps later. Either way the agent cannot set it.
+  // Recipient is pinned by the MCP, NEVER from an agent argument. The source a
+  // chain may use depends on DIRECTION:
+  //  - "out" (withdraw): keystore-sealed OR human-pasted dashboard pin (canWithdraw).
+  //  - "in"  (funding):  KEYSTORE-SEALED ONLY. A dashboard-pinned address is for
+  //    sweeps-OUT; it must never become the recipient for INBOUND funds (that would
+  //    silently widen a "where my money goes home" pin into "where trading capital
+  //    lands"). A per-chain keystore/dashboard disagreement ("conflict") refuses.
   let recipient: string;
   try {
     const treasury = await deps.treasury();
+    const src = chainSource(treasury, toChain);
     const t = treasury.byChain[toChain];
+    if (src === "conflict") {
+      return fail("treasury_refused", `destination conflict for ${toChain}: keystore and dashboard pin disagree — resolve before bridging`, {
+        withdrawCode: "treasury_conflict",
+      });
+    }
+    if (direction === "in" && src !== "keystore") {
+      return fail("treasury_refused", `funding-in recipient for ${toChain} must be keystore-sealed (a dashboard-pinned address is withdraw-only)`, {
+        withdrawCode: src === "none" ? "treasury_not_sealed" : "no_treasury_for_chain",
+      });
+    }
+    if (direction === "out" && !canWithdraw(src)) {
+      return fail("treasury_refused", `no withdraw destination for ${toChain} — pin one in the dashboard or seal one at setup`, {
+        withdrawCode: "treasury_not_sealed",
+      });
+    }
     if (!t) {
-      return fail("treasury_refused", `no sealed/allowlisted recipient for ${toChain}`, {
+      return fail("treasury_refused", `no recipient for ${toChain}`, {
         withdrawCode: "no_treasury_for_chain",
       });
     }
@@ -1048,13 +1068,21 @@ async function handlePlanFundingRoute(deps: ToolDeps, a: Args): Promise<ToolText
   const idempotencyKey = reqStr(a, "idempotencyKey");
   const lane = optEnum(a, "lane", LANES) as CctpLane | undefined;
 
-  // Recipient pinned server-side (treasury / allowlisted thin-wallet), not agent.
+  // Recipient pinned server-side, never an agent argument. Funding-IN lands trading
+  // capital, so it must be KEYSTORE-SEALED — the human-pasted dashboard pin is
+  // withdraw-only and is rejected here (and on a keystore/dashboard conflict).
   let recipient: string;
   try {
     const treasury = await deps.treasury();
+    const src = chainSource(treasury, toChain);
+    if (src !== "keystore") {
+      return fail("treasury_refused", `funding-in recipient for ${toChain} must be keystore-sealed (a dashboard-pinned address is withdraw-only)`, {
+        withdrawCode: src === "conflict" ? "treasury_conflict" : src === "none" ? "treasury_not_sealed" : "no_treasury_for_chain",
+      });
+    }
     const t = treasury.byChain[toChain];
     if (!t) {
-      return fail("treasury_refused", `no sealed/allowlisted recipient for ${toChain}`, {
+      return fail("treasury_refused", `no sealed recipient for ${toChain}`, {
         withdrawCode: "no_treasury_for_chain",
       });
     }

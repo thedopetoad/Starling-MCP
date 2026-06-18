@@ -19,26 +19,86 @@
 //
 // What this module DOES buy you, cheaply:
 //   - The withdraw tool takes NO recipient argument from the agent. The
-//     destination is read ONLY from the sealed treasury. "send to address X"
+//     destination is read ONLY from a pinned source. "send to address X"
 //     is not an expressible capability through the tool surface.
 //   - Binding the treasury into the keystore AAD makes an on-disk treasury
 //     rewrite TAMPER-EVIDENT: decrypt throws instead of silently signing to a
 //     swapped address. (Tamper-EVIDENT, not tamper-RESISTANT — a process that
 //     already holds the decrypted key ignores this module entirely.)
+//
+// TWO DESTINATION SOURCES (see chainSource()):
+//   - "keystore": the AAD-sealed treasury above (strongest; tamper-evident).
+//   - "dashboard": a per-chain address the HUMAN pasted into the Starling
+//     dashboard, written to ~/.starling/treasury.json (see withdraw/pinned-file.ts).
+//     Its value is UX + TRANSCRIPTION INTEGRITY: the user's exact pasted bytes
+//     reach disk without the agent ever re-typing the 40/44-char string into a
+//     config (where it could corrupt one character). It is NOT a security
+//     control — a code-exec'd agent can rewrite that file (same ceiling above).
+//     The 4-byte commitment we surface is a transcription check the human
+//     eyeballs, not a cryptographic one. So `sealed` stays true ONLY for the
+//     keystore source; the dashboard source is allowed for WITHDRAWS but carries
+//     sealed=false. Funding-IN recipients stay keystore-only (tools/index.ts).
+//     A keystore and a dashboard pin that DISAGREE on a chain => "conflict" =>
+//     the withdraw is refused (fail-closed) until the human resolves it.
 // ---------------------------------------------------------------------------
 
 import type { Chain } from "../adapters/types.js";
 
-/** A per-chain sweep destination, read from the decrypted+authenticated keystore. */
+/**
+ * Where a chain's withdraw destination came from. Drives the withdraw/funding-in
+ * split and honest reporting in auth_check:
+ *   - "keystore"  — the AAD-sealed treasury (strongest, tamper-evident).
+ *   - "dashboard" — a human-pasted address from ~/.starling/treasury.json.
+ *   - "conflict"  — keystore and dashboard disagree for this chain (refuse).
+ *   - "none"      — no destination set for this chain.
+ */
+export type TreasurySource = "keystore" | "dashboard" | "none" | "conflict";
+
+/** A per-chain sweep destination, read from the keystore and/or the pinned file. */
 export interface SealedTreasury {
-  /** Authenticated address per chain. Missing chain => withdraws on it refused. */
+  /** Resolved address per chain. Missing chain => withdraws on it refused. */
   byChain: Partial<Record<Chain, string>>;
   /**
    * True only when the treasury was recovered from inside the AEAD-authenticated
-   * keystore (AAD-bound). If false (e.g. legacy plaintext config fallback) the
-   * caller MUST refuse to build a withdraw and tell the user to re-run setup.
+   * keystore (AAD-bound). NEVER set true for the dashboard-pinned file — `sealed`
+   * means cryptographic tamper-evidence and nothing else. A dashboard-only
+   * destination carries sealed=false but is still withdraw-eligible via
+   * sourceByChain.
    */
   sealed: boolean;
+  /**
+   * Per-chain provenance. OPTIONAL so legacy callers/tests that build
+   * {sealed, byChain} still compile — chainSource() derives the source from
+   * `sealed` + presence when this is absent. mergeTreasury() always sets it.
+   */
+  sourceByChain?: Partial<Record<Chain, TreasurySource>>;
+}
+
+/**
+ * The provenance of one chain's destination. Prefers the explicit per-chain
+ * mark from mergeTreasury(); falls back to the legacy rule (sealed keystore vs
+ * nothing) so old {sealed, byChain} values behave exactly as before.
+ */
+export function chainSource(t: SealedTreasury, chain: Chain): TreasurySource {
+  const explicit = t.sourceByChain?.[chain];
+  if (explicit) return explicit;
+  if (!t.byChain[chain]) return "none";
+  return t.sealed ? "keystore" : "none";
+}
+
+/** A source whose address a WITHDRAW may sweep to (keystore or dashboard). */
+export function canWithdraw(src: TreasurySource): boolean {
+  return src === "keystore" || src === "dashboard";
+}
+
+/** True if ANY chain has a withdraw-eligible destination (keystore or dashboard). */
+function anyChainWithdrawable(t: SealedTreasury): boolean {
+  const chains = new Set<Chain>([
+    ...(Object.keys(t.byChain) as Chain[]),
+    ...((t.sourceByChain ? Object.keys(t.sourceByChain) : []) as Chain[]),
+  ]);
+  for (const c of chains) if (canWithdraw(chainSource(t, c))) return true;
+  return false;
 }
 
 export class WithdrawError extends Error {
@@ -47,7 +107,8 @@ export class WithdrawError extends Error {
       | "treasury_not_sealed"
       | "no_treasury_for_chain"
       | "recipient_not_allowed"
-      | "amount_exceeds_cap",
+      | "amount_exceeds_cap"
+      | "treasury_conflict",
     message: string,
   ) {
     super(message);
@@ -72,29 +133,47 @@ export interface ResolvedWithdraw {
 
 /**
  * Resolve the (only) legal recipient for a withdraw. Deliberately takes NO
- * recipient parameter: the destination is the sealed treasury for the chain or
- * the build is refused. This is the single chokepoint build_withdraw_tx uses.
+ * recipient parameter: the destination is the pinned treasury for the chain
+ * (keystore-sealed OR dashboard-pinned) or the build is refused. This is the
+ * single chokepoint build_withdraw uses.
  *
- * Throws WithdrawError on: unsealed treasury, no treasury for the chain, or an
- * amount over the per-call cap. There is no code path that returns an
- * agent-supplied address.
+ * Throws WithdrawError on: a keystore/dashboard conflict, no destination
+ * anywhere, no destination for the chain, or an amount over the per-call cap.
+ * There is no code path that returns an agent-supplied address.
  */
 export function resolveWithdrawRecipient(
   treasury: SealedTreasury,
   req: WithdrawRequest,
 ): ResolvedWithdraw {
-  if (!treasury.sealed) {
+  const src = chainSource(treasury, req.chain);
+  if (src === "conflict") {
     throw new WithdrawError(
-      "treasury_not_sealed",
-      "Treasury is not sealed into the keystore. Re-run `agent-wallet init` " +
-        "with your passphrase to bind a treasury address before withdrawing.",
+      "treasury_conflict",
+      `Withdraw destination conflict for "${req.chain}": the keystore-sealed treasury and the ` +
+        "dashboard-pinned address disagree. Resolve it (delete the stale entry in " +
+        "~/.starling/treasury.json, or re-seal at `agent-wallet init`) before withdrawing.",
+    );
+  }
+  if (!canWithdraw(src)) {
+    // Distinguish "nothing set anywhere" from "set, but not for this chain" so
+    // the existing error vocabulary stays stable.
+    if (!anyChainWithdrawable(treasury)) {
+      throw new WithdrawError(
+        "treasury_not_sealed",
+        "No withdraw destination is set. Paste your address into the Starling dashboard " +
+          "(`set-treasury`), or seal one at `agent-wallet init`. No agent recipient is accepted.",
+      );
+    }
+    throw new WithdrawError(
+      "no_treasury_for_chain",
+      `No withdraw destination for chain "${req.chain}".`,
     );
   }
   const recipient = treasury.byChain[req.chain];
   if (!recipient) {
     throw new WithdrawError(
       "no_treasury_for_chain",
-      `No sealed treasury address for chain "${req.chain}".`,
+      `No withdraw destination for chain "${req.chain}".`,
     );
   }
   if (cmpDecimal(req.amount, req.maxPerCall) > 0) {
@@ -117,17 +196,24 @@ export function assertRecipientIsTreasury(
   chain: Chain,
   builtRecipient: string,
 ): void {
+  const src = chainSource(treasury, chain);
   const expected = treasury.byChain[chain];
-  if (!treasury.sealed || !expected) {
+  if (src === "conflict") {
+    throw new WithdrawError(
+      "treasury_conflict",
+      `Cannot validate withdraw recipient for "${chain}": keystore and dashboard pin disagree.`,
+    );
+  }
+  if (!canWithdraw(src) || !expected) {
     throw new WithdrawError(
       "treasury_not_sealed",
-      "Cannot validate withdraw recipient: no sealed treasury for chain.",
+      "Cannot validate withdraw recipient: no withdraw destination set for chain.",
     );
   }
   if (!sameAddress(chain, builtRecipient, expected)) {
     throw new WithdrawError(
       "recipient_not_allowed",
-      `Built withdraw recipient ${builtRecipient} != sealed treasury ${expected}.`,
+      `Built withdraw recipient ${builtRecipient} != withdraw destination ${expected}.`,
     );
   }
 }

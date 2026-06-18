@@ -25,6 +25,8 @@ import {
   assertRecipientIsTreasury,
   WithdrawError,
   cmpDecimal,
+  chainSource,
+  canWithdraw,
   type SealedTreasury,
 } from "./allowlist.js";
 import { canonicalTreasuryFields } from "../keystore/treasury-seal.js";
@@ -100,6 +102,65 @@ test("cmpDecimal orders by integer length then lexical fraction (no float drift)
   assert.equal(cmpDecimal("9", "10"), -1); // integer-length compare, not "9">"1"
   assert.equal(cmpDecimal("1.5", "1.50"), 0);
   assert.equal(cmpDecimal("0.2", "0.19"), 1);
+});
+
+// ── (A2) dashboard-pinned source + per-chain provenance ───────────────────
+
+test("a dashboard-pinned destination is withdraw-eligible (sealed stays false)", () => {
+  const pinned: SealedTreasury = {
+    sealed: false, // never raised by the file — only the keystore seals
+    byChain: { polygon: TREASURY },
+    sourceByChain: { polygon: "dashboard" },
+  };
+  const out = resolveWithdrawRecipient(pinned, { chain: "polygon", amount: "10", maxPerCall: "100" });
+  assert.equal(out.recipient, TREASURY);
+});
+
+test("assertRecipientIsTreasury accepts a dashboard-pinned destination", () => {
+  const pinned: SealedTreasury = {
+    sealed: false,
+    byChain: { polygon: TREASURY },
+    sourceByChain: { polygon: "dashboard" },
+  };
+  assert.doesNotThrow(() => assertRecipientIsTreasury(pinned, "polygon", TREASURY));
+  assert.throws(
+    () => assertRecipientIsTreasury(pinned, "polygon", ATTACKER),
+    (e: unknown) => e instanceof WithdrawError && e.code === "recipient_not_allowed",
+  );
+});
+
+test("a keystore/dashboard conflict refuses the withdraw (fail-closed)", () => {
+  const conflicted: SealedTreasury = {
+    sealed: true,
+    byChain: { polygon: TREASURY },
+    sourceByChain: { polygon: "conflict" },
+  };
+  assert.throws(
+    () => resolveWithdrawRecipient(conflicted, { chain: "polygon", amount: "1", maxPerCall: "100" }),
+    (e: unknown) => e instanceof WithdrawError && e.code === "treasury_conflict",
+  );
+  assert.throws(
+    () => assertRecipientIsTreasury(conflicted, "polygon", TREASURY),
+    (e: unknown) => e instanceof WithdrawError && e.code === "treasury_conflict",
+  );
+});
+
+test("chainSource: explicit per-chain source wins; legacy {sealed,byChain} derives", () => {
+  assert.equal(chainSource({ sealed: true, byChain: { polygon: TREASURY } }, "polygon"), "keystore");
+  assert.equal(chainSource({ sealed: false, byChain: {} }, "polygon"), "none");
+  assert.equal(
+    chainSource({ sealed: false, byChain: { solana: "x" }, sourceByChain: { solana: "dashboard" } }, "solana"),
+    "dashboard",
+  );
+  // per-chain mixed: polygon keystore-sealed, solana dashboard-pinned
+  const mixed: SealedTreasury = {
+    sealed: true,
+    byChain: { polygon: TREASURY, solana: "So1aNa" },
+    sourceByChain: { polygon: "keystore", solana: "dashboard" },
+  };
+  assert.equal(chainSource(mixed, "polygon"), "keystore");
+  assert.equal(chainSource(mixed, "solana"), "dashboard");
+  assert.deepEqual([canWithdraw("keystore"), canWithdraw("dashboard"), canWithdraw("none"), canWithdraw("conflict")], [true, true, false, false]);
 });
 
 // ── (B) the allowlist cannot be SILENTLY changed (AAD tamper-evidence) ─────

@@ -13,6 +13,9 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { bootUnlock, loadedAddresses, activeKeySource } from "./signers/index.js";
 import { INSTRUCTIONS } from "./instructions.js";
+import { canWithdraw, chainSource, type SealedTreasury } from "./withdraw/allowlist.js";
+import { treasuryCommitment } from "./keystore/treasury-seal.js";
+import { CHAINS } from "./keystore/format.js";
 import { utcDayKey, addDecimal, type RiskLimits, type DailyUsage } from "./policy/limits.js";
 import { gasReserveStatus } from "./policy/gas-reserve.js";
 import { polymarketAdapter } from "./adapters/polymarket.js";
@@ -46,6 +49,29 @@ const raw = (s: string) => ({ content: [{ type: "text" as const, text: s }] });
 
 const EMPTY = { type: "object" as const, properties: {} };
 
+const CHAIN_ENUM = { type: "string" as const, enum: ["polygon", "hyperliquid", "solana"] };
+
+// Build the per-chain withdraw-destination report shared by auth_check and
+// request_withdraw_address. Per chain: the resolved address, its provenance
+// (keystore | dashboard | conflict | none) and the 4-byte transcription
+// commitment the human compares against their wallet. Addresses are PUBLIC — no
+// secret is ever exposed. `sealed` reflects ONLY the AAD-bound keystore source.
+async function treasuryReport(t: SealedTreasury) {
+  const byChain: Record<string, { address: string | null; source: string; commitment?: string }> = {};
+  for (const chain of CHAINS) {
+    const source = chainSource(t, chain);
+    const address = t.byChain[chain] ?? null;
+    if (!address && source === "none") continue; // omit chains with nothing set
+    const commitment = address ? await treasuryCommitment({ chain, treasury: address }) : undefined;
+    byChain[chain] = { address, source, commitment };
+  }
+  return {
+    sealed: t.sealed,
+    withdrawsEnabled: CHAINS.some((c) => canWithdraw(chainSource(t, c))),
+    byChain,
+  };
+}
+
 // The trust-layer read tools (always available) + the money-moving + venue tools
 // contributed by the tools registry. The registry owns its own schemas + the
 // switch arm via handleMoneyTool, so adding a venue/bridge never touches this file.
@@ -71,6 +97,18 @@ const TOOLS = [
     description:
       "Read FIRST. How to drive Starling: the correct call order, the no-key vs key boundary, the safety rules (worst-price required, idempotencyKey required, withdraw-only-to-treasury), funding/gas, venues, and what's live this session.",
     inputSchema: EMPTY,
+  },
+  {
+    name: "request_withdraw_address",
+    description:
+      "Read-only: report the CURRENT withdraw destination (per chain: address, source, 4-byte commitment, " +
+      "whether withdraws are enabled). Takes NO address argument — you (the agent) cannot set or change the " +
+      "destination, by design, so you never transcribe the address. When the user wants to withdraw and none " +
+      "is set, call this and tell them to pin it in the Starling dashboard (`set-treasury`), then retry the withdraw.",
+    inputSchema: {
+      type: "object" as const,
+      properties: { chain: { ...CHAIN_ENUM, description: "Optional: report just this chain." } },
+    },
   },
   ...MONEY_TOOLS,
 ];
@@ -246,6 +284,27 @@ export async function startServer(): Promise<void> {
             Object.entries(addrs).map(([k, v]) => [k, { signerLoaded: !!v }]),
           ),
           gasReserve: Object.fromEntries(gasEntries),
+          // The withdraw destination(s): keystore-sealed and/or human-pasted via
+          // the dashboard. Lets the dashboard render + the human verify the
+          // commitment. Re-read each call so a fresh dashboard pin shows up live.
+          treasury: await treasuryReport(await deps.treasury()),
+        });
+      }
+      case "request_withdraw_address": {
+        const rwaArgs = (req.params.arguments ?? {}) as Record<string, unknown>;
+        const want = typeof rwaArgs.chain === "string" ? rwaArgs.chain : undefined;
+        const report = await treasuryReport(await deps.treasury());
+        const byChain = want ? Object.fromEntries(Object.entries(report.byChain).filter(([c]) => c === want)) : report.byChain;
+        return text({
+          ...report,
+          byChain,
+          canSetFromChat: false,
+          instructions:
+            "This is your CURRENT withdraw destination — I cannot set or change it from chat, by design, so I " +
+            "never re-type your address (one wrong character would strand a sweep). To set or change it: open the " +
+            "Starling dashboard and run `set-treasury` (e.g. `python -m starling_dashboard set-treasury`), paste " +
+            "your address, and confirm. Verify the 4-byte commitment shown there matches your wallet/recovery sheet, " +
+            "then re-run the withdraw. Note: withdraws also need STARLING_WITHDRAW_MAX > 0.",
         });
       }
       case "get_wallet_addresses":
