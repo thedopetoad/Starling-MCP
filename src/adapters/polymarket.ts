@@ -382,9 +382,12 @@ export class PolymarketAdapter implements VenueAdapter {
     };
   }
 
-  /** Read + normalize a single position from the data API. */
+  /** Read + normalize a single position from the data API. In deposit-wallet mode
+   *  positions are held by the DW (the order maker), NOT the bare EOA — read against
+   *  whichever actually holds them, or close/state never find the position. */
   private async readPosition(tokenId: string): Promise<PositionState | null> {
-    const maker = getEvmSigner("polymarket").address;
+    const eoa = getEvmSigner("polymarket").address as `0x${string}`;
+    const maker = this.depositWallet ? deriveDepositWalletUUPS(eoa) : eoa;
     const rows = await fetchPositions(maker, { fetchImpl: this.fetchImpl });
     const row = rows.find((p) => p.asset === tokenId);
     if (!row) return null;
