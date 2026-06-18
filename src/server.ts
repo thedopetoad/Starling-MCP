@@ -14,6 +14,7 @@ import {
 import { bootUnlock, loadedAddresses, activeKeySource } from "./signers/index.js";
 import { INSTRUCTIONS } from "./instructions.js";
 import { utcDayKey, addDecimal, type RiskLimits, type DailyUsage } from "./policy/limits.js";
+import { gasReserveStatus } from "./policy/gas-reserve.js";
 import { polymarketAdapter } from "./adapters/polymarket.js";
 import { hyperliquidAdapter } from "./adapters/hyperliquid.js";
 import { jupiterAdapter } from "./adapters/jupiter.js";
@@ -223,7 +224,20 @@ export async function startServer(): Promise<void> {
     switch (name) {
       case "get_instructions":
         return raw(INSTRUCTIONS);
-      case "auth_check":
+      case "auth_check": {
+        // Gas-out reserve per loaded chain: is the wallet above the native-gas
+        // floor it needs to ALWAYS be able to bridge funds home? Surfaced here so
+        // the agent sees the strand-trap risk up front and tops up (ensure_gas)
+        // before it trades a wallet down to where it can't move its own USDC.
+        const gasChains: Chain[] = ["polygon", "hyperliquid", "solana"];
+        const gasEntries = await Promise.all(
+          gasChains
+            .filter((c) => (c === "solana" ? addrs.solana : c === "hyperliquid" ? addrs.hyperliquid : addrs.polygon))
+            .map(async (c) => {
+              const s = gasReserveStatus(c, await deps.nativeGas(c).catch(() => 0));
+              return [c, { balance: s.balance, floor: s.floor, symbol: s.symbol, ok: s.ok, critical: s.critical, ...(s.ok ? {} : { warning: s.note }) }] as const;
+            }),
+        );
         return text({
           network: process.env.STARLING_NETWORK ?? "testnet",
           keySource: activeKeySource(),
@@ -231,7 +245,9 @@ export async function startServer(): Promise<void> {
           venues: Object.fromEntries(
             Object.entries(addrs).map(([k, v]) => [k, { signerLoaded: !!v }]),
           ),
+          gasReserve: Object.fromEntries(gasEntries),
         });
+      }
       case "get_wallet_addresses":
         return text(addrs);
       case "ping":

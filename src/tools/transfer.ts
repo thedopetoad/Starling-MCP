@@ -14,6 +14,7 @@ import type { Chain } from "../adapters/types.js";
 import type { Bridge, BridgeProvider, BridgeRoute, CctpLane } from "../bridge/types.js";
 import type { Executor, ExecResult } from "../exec/executor.js";
 import { cctpFlightRoute } from "../bridge/cctp.js";
+import { gasReserveStatus } from "../policy/gas-reserve.js";
 
 export type Rail = BridgeProvider; // "cctp" | "debridge"
 
@@ -70,6 +71,10 @@ export interface TransferResult {
   recipient: string;
   results: ExecResult[];
   note: string;
+  /** Set when the SOURCE wallet is at/below its native gas-out reserve — i.e. this
+   *  bridge (or the next op) risks stranding it. Advisory, not blocking: the
+   *  bring-it-home bridge must still be allowed when a wallet is already low. */
+  gasReserveWarning?: string;
 }
 
 /** Execute the SOURCE leg(s) of a cross-chain USDC transfer and return the flightId
@@ -102,6 +107,13 @@ export async function runTransfer(
     lane: args.lane,
   };
 
+  // Strand-trap check: is the SOURCE wallet at/below the native gas it needs to
+  // keep bridging out? We do NOT block (a low wallet must still be able to bring
+  // funds home — that IS the escape hatch), but we surface a loud warning so the
+  // agent tops the wallet up before it traps itself on the next op.
+  const srcGas = await deps.nativeGas(args.fromChain).catch(() => 0);
+  const srcReserve = gasReserveStatus(args.fromChain, srcGas);
+
   const placed = await bridge.placeOrder(route);
   const results = await deps.executor.execSequence(placed.txs);
   const allOk = results.length === placed.txs.length && results.every((r) => r.ok);
@@ -123,6 +135,7 @@ export async function runTransfer(
     note: allOk
       ? `Source leg(s) broadcast on ${args.fromChain} via ${rail}. Poll advance_bridge("${rail}","${flightId}") until delivered on ${args.toChain}.`
       : `Source execution failed: ${results.find((r) => !r.ok)?.error ?? "unknown"}. Funds did NOT cross; retry with the same idempotencyKey.`,
+    ...(srcReserve.ok ? {} : { gasReserveWarning: `${args.fromChain}: ${srcReserve.note}` }),
   };
 }
 

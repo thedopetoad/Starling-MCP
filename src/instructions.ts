@@ -97,6 +97,13 @@ open_position checks the caps BEFORE building, so a blocked trade never signs.
   CCTP, else deBridge) unless you name a provider.
 - Gas is on you: a brand-new wallet needs a little native (MATIC/ETH/SOL) to make
   its first move; after that ensure_gas can ride a top-up along with funding.
+- **Keep a gas-out reserve (or get stranded).** Every wallet must hold enough NATIVE
+  gas to ALWAYS afford a bridge OUT. Trade one below that and it's trapped — holding
+  USDC it can't move, because USDC can't pay a bridge's native fee. **auth_check**
+  reports a 'gasReserve' per chain ({ balance, floor, ok, critical }); when one flips
+  !ok, top it up with **ensure_gas** BEFORE the next trade, not after. 'transfer' also
+  flags it ('gasReserveWarning') when a bridge would leave the source low. Defaults:
+  0.02 SOL / 0.15 POL / 0.003 ETH — override per chain with 'STARLING_GAS_RESERVE_<CHAIN>'.
 
 ## Safety you can rely on
 - Keys never leave this box; I only ever sign through these tools. There is **no

@@ -51,6 +51,14 @@ const stages = {
     console.log("money tools:", MONEY_TOOLS.map((t) => t.name).join(", "));
     console.log("addresses:", A);
   },
+  // The exact gas-out-reserve computation auth_check runs, against LIVE balances —
+  // proves the strand-trap guard sees the real wallet state.
+  async gas() {
+    const { gasReserveStatus } = await import("../dist/policy/gas-reserve.js");
+    for (const c of ["polygon", "hyperliquid", "solana"]) {
+      show(gasReserveStatus(c, await deps.nativeGas(c).catch(() => 0)));
+    }
+  },
   async quote() {
     show(await call("get_quote", { venue: a[0], marketId: a[1], side: a[2] }));
   },
