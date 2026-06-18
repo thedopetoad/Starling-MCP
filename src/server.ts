@@ -14,6 +14,7 @@ import {
 import { bootUnlock, loadedAddresses, activeKeySource } from "./signers/index.js";
 import { INSTRUCTIONS } from "./instructions.js";
 import { canWithdraw, chainSource, type SealedTreasury } from "./withdraw/allowlist.js";
+import { pinnedTreasuryPath } from "./withdraw/pinned-file.js";
 import { treasuryCommitment } from "./keystore/treasury-seal.js";
 import { CHAINS } from "./keystore/format.js";
 import { utcDayKey, addDecimal, type RiskLimits, type DailyUsage } from "./policy/limits.js";
@@ -295,16 +296,38 @@ export async function startServer(): Promise<void> {
         const want = typeof rwaArgs.chain === "string" ? rwaArgs.chain : undefined;
         const report = await treasuryReport(await deps.treasury());
         const byChain = want ? Object.fromEntries(Object.entries(report.byChain).filter(([c]) => c === want)) : report.byChain;
+        const path = pinnedTreasuryPath();
         return text({
           ...report,
           byChain,
-          canSetFromChat: false,
-          instructions:
-            "This is your CURRENT withdraw destination — I cannot set or change it from chat, by design, so I " +
-            "never re-type your address (one wrong character would strand a sweep). To set or change it: open the " +
-            "Starling dashboard and run `set-treasury` (e.g. `python -m starling_dashboard set-treasury`), paste " +
-            "your address, and confirm. Verify the 4-byte commitment shown there matches your wallet/recovery sheet, " +
-            "then re-run the withdraw. Note: withdraws also need STARLING_WITHDRAW_MAX > 0.",
+          path,
+          // The line the agent should SAY to the user when none is set / they want to change it.
+          suggestedReply:
+            "If you have the Starling Dashboard, please paste the withdraw address into that. " +
+            "Otherwise, if you want, I can edit the withdraw address file myself.",
+          // Two ways to set it. Prefer the dashboard; the file-edit is a fallback.
+          setOptions: [
+            {
+              method: "dashboard",
+              recommended: true,
+              how:
+                "Ask the user to run `set-treasury` in the Starling dashboard " +
+                "(e.g. `python -m starling_dashboard set-treasury`) and paste the address there. " +
+                "Cleanest path — you never handle the address bytes.",
+            },
+            {
+              method: "edit_file",
+              recommended: false,
+              how:
+                `If the user has no dashboard and explicitly asks you to — and you can write files — write ${path} ` +
+                "using `fileFormat` below and the address the USER gives you (never invent or guess one). Then call " +
+                "request_withdraw_address again and show the user the returned `commitment` to confirm it round-tripped uncorrupted.",
+            },
+          ],
+          fileFormat: { version: 1, byChain: { polygon: "0x… (40 hex, EVM)", solana: "… (base58, 32 bytes)" } },
+          note:
+            "The withdraw tool itself takes NO recipient argument — the destination is read from this file. " +
+            "Withdraws also need STARLING_WITHDRAW_MAX > 0. Verify the commitment against your wallet/recovery sheet, not chat.",
         });
       }
       case "get_wallet_addresses":

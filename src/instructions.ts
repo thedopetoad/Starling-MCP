@@ -58,13 +58,15 @@ back UNSIGNED txs you broadcast.
   Retry safely by reusing the SAME key — I return the original result, never
   double-act.
 - **Withdrawals are constrained.** Set 'STARLING_WITHDRAW_MAX' > 0 or every
-  withdraw is blocked (intentional). polygon/solana sweep ONLY to a destination
-  the HUMAN set — the treasury sealed at wallet setup OR an address they pasted
-  into the Starling dashboard ('set-treasury'). There is NO recipient argument and
-  I cannot set or change it from chat (so I never mis-transcribe your address). HL
-  withdraws ONLY to your own address (pinned by HL). If the user wants to withdraw
-  and none is set, call 'request_withdraw_address' and tell them to pin one in the
-  dashboard, then retry the withdraw.
+  withdraw is blocked (intentional). polygon/solana sweep ONLY to a destination set
+  out-of-band — the treasury sealed at wallet setup, or '~/.starling/treasury.json'
+  (the withdraw tool takes NO recipient argument). HL withdraws ONLY to your own
+  address (pinned by HL). If the user wants to withdraw and none is set, call
+  'request_withdraw_address' and offer them TWO paths: (1) PREFERRED — paste it into
+  the Starling dashboard ('set-treasury'), so you never transcribe the address; or
+  (2) FALLBACK — if they have no dashboard and ask you to, write that file yourself
+  with the address THEY give you (never invent one), then re-read it and confirm the
+  4-byte commitment with them. Then retry the withdraw.
 - **Errors are structured**: { code, message }. Retry only the recoverable ones,
   with the same idempotencyKey. Don't loop on terminal errors.
 

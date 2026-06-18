@@ -136,15 +136,16 @@ github:thedopetoad/Starling-MCP` and call `tools/list`.
 
 > **Withdraws can only go to a destination YOU set.** The withdraw tool takes **no
 > recipient argument** — "send to address X" is not an expressible capability. The
-> destination is read from one of two human-set sources: the treasury **sealed** at
-> wallet setup, or an address you **pasted into the Starling dashboard**
-> (`set-treasury`), stored in `~/.starling/treasury.json`. The agent can *read* the
-> destination (`request_withdraw_address`) and route you to the dashboard, but it
-> can never set or change it — so it never re-types your 40/44-char address into a
-> config and corrupts a character. Inbound *funding* recipients stay **keystore-only**
-> (a dashboard pin is withdraw-only). See [Security invariants](#security-invariants)
-> for the honest ceiling — the file is UX + transcription integrity, not a crypto
-> control against a code-exec'd agent.
+> destination is read from one of two sources: the treasury **sealed** at wallet
+> setup, or `~/.starling/treasury.json`. To set it, `request_withdraw_address` offers
+> two paths: **preferred** — paste it into the Starling dashboard (`set-treasury`), so
+> the agent never transcribes your address; **fallback** — if you have no dashboard
+> and ask it to, a file-capable agent can write that file with an address *you* give
+> it, then read it back so you confirm the 4-byte commitment. The MCP exposes no
+> address-setting tool; the file is the interface. Inbound *funding* recipients stay
+> **keystore-only** (the pinned file is withdraw-only). See
+> [Security invariants](#security-invariants) for the honest ceiling — the file is UX
+> + transcription integrity, not a crypto control against a code-exec'd agent.
 
 ## Reference harness (the worked lifecycle)
 
@@ -272,13 +273,16 @@ starling-mcp doctor     hygiene checks (Node, key source, perms, NEXT_PUBLIC lea
 3. `STARLING_KEY` gates only metered hosted analytics — never the signing path.
 4. Decrypted secrets live in `Buffer`s and are zeroized after a signer captures
    them (best-effort; not a guarantee against a live memory dump).
-5. Withdraw destinations are human-set only — the keystore-sealed treasury
-   (AAD-bound, tamper-evident) and/or the dashboard-pinned `~/.starling/treasury.json`
-   (a human paste; UX + transcription integrity, **not** crypto-tamper-resistant —
-   a code-exec'd agent can rewrite it, same honest ceiling as the sealed treasury).
-   A keystore/dashboard disagreement fails **closed** (`treasury_conflict`). Inbound
-   funding recipients accept the keystore source only; the dashboard pin is
-   withdraw-only, so it can never silently become an inbound-funds recipient.
+5. Withdraw destinations are set out-of-band, never as a withdraw argument — the
+   keystore-sealed treasury (AAD-bound, tamper-evident) and/or `~/.starling/treasury.json`.
+   That file is normally a human paste via the dashboard (UX + transcription
+   integrity); a file-capable agent may also write it as a fallback, with the user's
+   address + a commitment round-trip to confirm. Either way it is **not**
+   crypto-tamper-resistant — a code-exec'd agent can rewrite it (same honest ceiling
+   as the sealed treasury) — and the MCP itself exposes **no** address-setting tool;
+   it only reads the file. A keystore/file disagreement fails **closed**
+   (`treasury_conflict`). Inbound funding recipients accept the keystore source only;
+   the pinned file is withdraw-only.
 
 Built on the official [MCP TypeScript SDK](https://www.npmjs.com/package/@modelcontextprotocol/sdk).
 Shares `src/keystore/crypto.ts` + a frozen decryption vector with the wallet tool
