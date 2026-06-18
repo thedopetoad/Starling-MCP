@@ -6,8 +6,9 @@
 // current with the real tool surface: read-only tools are live; Hyperliquid (incl
 // the native withdraw) and Solana/Jupiter are live end-to-end; cross-chain
 // bridging (CCTP + deBridge) + gas are WIRED but return UNSIGNED legs to broadcast;
-// Polymarket order placement is gated by the V2 deposit-wallet requirement.
-// auth_check reports what's actually loaded.
+// Polymarket trades LIVE via the V2 deposit wallet (sigType 3 ERC-7739, fill
+// settled on-chain) — the one-time DW deploy/approve/fund setup is being folded
+// into enable_venue. auth_check reports what's actually loaded.
 export const INSTRUCTIONS = `# Starling Execution MCP — how to drive me
 
 I'm a LOCAL, non-custodial execution layer. You talk to me in plain language; I
@@ -76,12 +77,17 @@ open_position checks the caps BEFORE building, so a blocked trade never signs.
 - **Solana / Jupiter** (spot swap) — FULLY LIVE: keyless Jupiter Swap API, v0 tx
   signed locally with the ed25519 key, broadcast + confirmed via the Solana RPC.
   marketId is 'jup:<mint>'; buy spends SOL for the mint, sell returns it.
-- **Polymarket** (prediction markets, Polygon) — order BUILD + local sign is live,
-  but PLACING an order from a fresh self-custodied EOA is currently GATED by
-  Polymarket's V2 deposit-wallet requirement: the CLOB wants a registered per-user
-  deposit wallet (signatureType 3), not a bare EOA. That path is in progress, so
-  PM open/close may be rejected by the CLOB today — Hyperliquid + Solana are the
-  unblocked venues. enable_venue (pUSD wrap + scoped approvals) is built.
+- **Polymarket** (prediction markets, Polygon) — LIVE end to end: open_position /
+  close_position build + locally sign a V2 DEPOSIT-WALLET order (signatureType 3,
+  ERC-7739) whose maker is the EOA's derived deposit wallet, then POST it. A real
+  fill has settled on-chain (tx 0x717c83b0…). ONE-TIME setup per wallet before its
+  first order can settle: the deposit wallet must be (1) DEPLOYED + (2) APPROVED to
+  let the exchanges spend its pUSD/outcome-tokens + (3) FUNDED with pUSD. The deploy
+  + on-DW approvals run through Polymarket's gasless relayer (needs the builder
+  creds — STARLING_PM_BUILDER_API_KEY/_SECRET/_PASSPHRASE); the funding is a wrap of
+  USDC.e -> pUSD to the deposit wallet. (This setup is being folded into enable_venue;
+  until then it's a pre-step.) Set STARLING_PM_DEPOSIT_WALLET=false only for a
+  pre-registered bare-EOA/proxy.
 
 ## Funding & gas (WIRED — 'transfer'/'advance_bridge' EXECUTE; build_* are lower-level)
 - **CCTP** — the ~1:1 USDC rail between EVM chains (Polygon <-> Arbitrum). Needs
