@@ -55,11 +55,27 @@ export const PUSD = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB" as const;
 export const USDC_E = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174" as const;
 
 /**
- * Native Circle USDC on Polygon — what CCTP mints. Also accepted by the Onramp
- * wrap() per the chain explorer. Distinct from USDC.e and pUSD.
+ * Native Circle USDC on Polygon — what CCTP mints. NOT directly wrappable: the
+ * CollateralOnramp.wrap() reverts on native USDC (it only accepts USDC.e). A
+ * CCTP/bridge-funded EOA must swap native -> USDC.e (UNISWAP_V3_SWAPROUTER02,
+ * fee-100 pool) BEFORE wrapping. Distinct from USDC.e and pUSD.
  * Source: https://developers.circle.com/stablecoins/usdc-contract-addresses
+ *         (wrap-rejects-native verified live, 2026-06-16; see trade-dw.mjs).
  */
 export const USDC_NATIVE = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359" as const;
+
+/**
+ * Uniswap V3 SwapRouter02 on Polygon — swaps native Circle USDC -> USDC.e (the
+ * Onramp's only accepted wrap source) through the deep fee-100 (0.01%) stable
+ * pool, ~1:1. The forward funding leg of a deposit wallet; the inverse of the
+ * wind-down's USDC.e -> native swap (dw-cashout.mjs).
+ * Source: https://docs.uniswap.org/contracts/v3/reference/deployments/polygon-deployments
+ */
+export const UNISWAP_V3_SWAPROUTER02 = "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45" as const;
+
+/** Fee tier (hundredths of a bip) of the native-USDC/USDC.e Uniswap V3 pool used
+ *  for the wrap-source swap. 100 = 0.01% — the deep stable pool. */
+export const USDC_SWAP_FEE = 100 as const;
 
 /**
  * EIP-712 Exchange order domain. version bumped V1->V2 to "2" (the L1

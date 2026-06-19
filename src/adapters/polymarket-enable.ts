@@ -40,6 +40,8 @@ import {
   NEG_RISK_CTF_EXCHANGE_V2,
   NEG_RISK_ADAPTER,
   COLLATERAL_DECIMALS,
+  UNISWAP_V3_SWAPROUTER02,
+  USDC_SWAP_FEE,
 } from "./polymarket-constants.js";
 
 /** A single unsigned EVM tx the local Polygon EOA signs + broadcasts. */
@@ -52,6 +54,8 @@ export interface UnsignedEvmTx {
   label:
     | "approve-usdce-onramp"
     | "wrap-usdce-to-pusd"
+    | "approve-native-router"
+    | "swap-native-to-usdce"
     | "approve-pusd-ctfExchange"
     | "approve-pusd-negRiskExchange"
     | "approve-pusd-negRiskAdapter"
@@ -93,6 +97,33 @@ const ONRAMP_WRAP_ABI = [
       { name: "_amount", type: "uint256" },
     ],
     outputs: [],
+  },
+] as const;
+
+/** Uniswap V3 SwapRouter02.exactInputSingle(params) — single-pool exact-in swap.
+ *  Used to convert native Circle USDC -> USDC.e before the wrap (the Onramp
+ *  rejects native USDC). Verbatim shape from the live-proven scripts/trade-dw.mjs. */
+const EXACT_INPUT_SINGLE_ABI = [
+  {
+    name: "exactInputSingle",
+    type: "function",
+    stateMutability: "payable",
+    inputs: [
+      {
+        name: "params",
+        type: "tuple",
+        components: [
+          { name: "tokenIn", type: "address" },
+          { name: "tokenOut", type: "address" },
+          { name: "fee", type: "uint24" },
+          { name: "recipient", type: "address" },
+          { name: "amountIn", type: "uint256" },
+          { name: "amountOutMinimum", type: "uint256" },
+          { name: "sqrtPriceLimitX96", type: "uint160" },
+        ],
+      },
+    ],
+    outputs: [{ name: "amountOut", type: "uint256" }],
   },
 ] as const;
 
@@ -200,15 +231,23 @@ export function buildEnableTradingTxs(args: EnableTradingArgs): UnsignedEvmTx[] 
   return txs;
 }
 
-/** Build only the wrap pair (approve + wrap), e.g. to top up collateral mid-session. */
+/**
+ * Build only the wrap pair (approve + wrap), e.g. to top up collateral mid-session
+ * or to fund a deposit wallet. `recipient` is where the minted pUSD lands: default
+ * the EOA itself, OR the deposit wallet — the Onramp's wrap `to` is arbitrary, so
+ * an EOA that holds the USDC.e can mint pUSD STRAIGHT INTO its deposit wallet in
+ * one tx (no separate transfer). The approve is scoped to the wrap amount, not MAX.
+ */
 export function buildWrapTxs(args: {
   eoa: `0x${string}`;
   amount: string;
   asset?: "usdce" | "native";
+  recipient?: `0x${string}`;
 }): UnsignedEvmTx[] {
   const wrapUnits = parseUnits(assertDecimal(args.amount, "amount"), COLLATERAL_DECIMALS);
   if (wrapUnits <= 0n) throw new Error("wrap amount must be > 0");
   const asset = args.asset === "native" ? USDC_NATIVE : USDC_E;
+  const to = args.recipient ?? args.eoa;
   return [
     {
       to: asset as `0x${string}`,
@@ -225,10 +264,63 @@ export function buildWrapTxs(args: {
       data: encodeFunctionData({
         abi: ONRAMP_WRAP_ABI,
         functionName: "wrap",
-        args: [asset as `0x${string}`, args.eoa, wrapUnits],
+        args: [asset as `0x${string}`, to, wrapUnits],
       }),
       value: "0",
       label: "wrap-usdce-to-pusd",
+    },
+  ];
+}
+
+/**
+ * Build the (approve + swap) pair that converts native Circle USDC -> USDC.e via
+ * the Uniswap V3 fee-100 pool, so a CCTP/bridge-funded EOA can feed the
+ * CollateralOnramp (which wraps USDC.e, NOT native USDC). The swapped USDC.e lands
+ * on the EOA, which then wraps it (see buildWrapTxs with recipient=depositWallet).
+ * `amountIn` is the native USDC to swap; `minOutBps` floors the output (default
+ * 9950 = 0.5% slippage; the pool is deep + ~1:1, so this is conservative). This is
+ * the forward inverse of the wind-down's USDC.e -> native swap.
+ */
+export function buildNativeToUsdceSwapTxs(args: {
+  eoa: `0x${string}`;
+  amountIn: string;
+  minOutBps?: number;
+}): UnsignedEvmTx[] {
+  const amountIn = parseUnits(assertDecimal(args.amountIn, "amountIn"), COLLATERAL_DECIMALS);
+  if (amountIn <= 0n) throw new Error("swap amountIn must be > 0");
+  const bps = BigInt(args.minOutBps ?? 9950);
+  if (bps <= 0n || bps > 10000n) throw new Error("minOutBps must be in (0, 10000]");
+  const minOut = (amountIn * bps) / 10000n;
+  return [
+    {
+      to: USDC_NATIVE as `0x${string}`,
+      data: encodeFunctionData({
+        abi: erc20Abi,
+        functionName: "approve",
+        args: [UNISWAP_V3_SWAPROUTER02 as `0x${string}`, amountIn], // SCOPED to swap amount
+      }),
+      value: "0",
+      label: "approve-native-router",
+    },
+    {
+      to: UNISWAP_V3_SWAPROUTER02 as `0x${string}`,
+      data: encodeFunctionData({
+        abi: EXACT_INPUT_SINGLE_ABI,
+        functionName: "exactInputSingle",
+        args: [
+          {
+            tokenIn: USDC_NATIVE as `0x${string}`,
+            tokenOut: USDC_E as `0x${string}`,
+            fee: USDC_SWAP_FEE,
+            recipient: args.eoa,
+            amountIn,
+            amountOutMinimum: minOut,
+            sqrtPriceLimitX96: 0n,
+          },
+        ],
+      }),
+      value: "0",
+      label: "swap-native-to-usdce",
     },
   ];
 }

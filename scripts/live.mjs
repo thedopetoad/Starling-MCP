@@ -374,6 +374,24 @@ async function pmEnable() {
   console.log("\n✓ Polymarket enable complete — pUSD wrapped + approvals set. open_position can now settle.");
 }
 
+// ── Polymarket DEPOSIT-WALLET enable (the DEFAULT path) — drives the REAL enabler ─
+// the enable_venue tool uses: gasless deploy + approve via the relayer, then (when
+// STARLING_PM_FUND_USDC is set) auto-wrap the EOA's bridged USDC -> pUSD STRAIGHT
+// into the DW. EXECUTES (no dry mode inside the enabler: deploy/approve are gasless;
+// the fund swap+wrap are small EOA txs that pay POL). Needs the builder relayer creds
+// (STARLING_PM_BUILDER_*) + a little POL on the EOA for the fund leg.
+async function enableDw() {
+  const { makeRealVenueEnabler } = await import("../dist/adapters/venue-enabler.js");
+  const eoa = getEvmSigner("polymarket").address;
+  const { deriveDepositWalletUUPS } = await import("../dist/adapters/polymarket-deposit-wallet.js");
+  console.log(`enable_venue(polymarket) | EOA ${eoa} -> DW ${deriveDepositWalletUUPS(eoa)}`);
+  console.log(`  STARLING_PM_FUND_USDC=${process.env.STARLING_PM_FUND_USDC ?? "(unset → deploy+approve only)"}`);
+  if (!LIVE) return void console.log("\nDRY — this stage EXECUTES (gasless deploy/approve + EOA-signed fund). Re-run with --live.");
+  console.log("\n>>> RUNNING REAL enable_venue(polymarket) LIVE <<<");
+  const r = await makeRealVenueEnabler().enable("polymarket");
+  console.log(JSON.stringify(r, null, 2));
+}
+
 // ── Polygon native-USDC -> USDC.e via Uniswap V3 (CollateralOnramp needs USDC.e) ──
 const USDCE_POLY = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 const UNI_ROUTER02 = "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45"; // Uniswap V3 SwapRouter02
@@ -589,6 +607,6 @@ async function transfer() {
   return route();
 }
 
-const stages = { balances, swap, bridge, "hl-deposit": hlDeposit, "hl-trade": hlTrade, "hl-close": hlClose, "hl-withdraw": hlWithdraw, "pm-creds": pmCreds, "pm-enable": pmEnable, "poly-swap": polySwap, "pm-trade": pmTrade, route, cctp, transfer };
+const stages = { balances, swap, bridge, "hl-deposit": hlDeposit, "hl-trade": hlTrade, "hl-close": hlClose, "hl-withdraw": hlWithdraw, "pm-creds": pmCreds, "pm-enable": pmEnable, "enable-dw": enableDw, "poly-swap": polySwap, "pm-trade": pmTrade, route, cctp, transfer };
 if (!stages[stage]) { console.log("stages:", Object.keys(stages).join(", ")); process.exit(1); }
 await stages[stage]();
