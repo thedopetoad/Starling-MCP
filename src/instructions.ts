@@ -7,8 +7,9 @@
 // the native withdraw) and Solana/Jupiter are live end-to-end; cross-chain
 // bridging (CCTP + deBridge) + gas are WIRED but return UNSIGNED legs to broadcast;
 // Polymarket trades LIVE via the V2 deposit wallet (sigType 3 ERC-7739, fill
-// settled on-chain) — the one-time DW deploy/approve/fund setup is being folded
-// into enable_venue. auth_check reports what's actually loaded.
+// settled on-chain) — the one-time DW deploy/approve/fund setup is fully folded
+// into enable_venue (gasless deploy+approve; STARLING_PM_FUND_USDC auto-wraps the
+// EOA's bridged USDC -> pUSD into the DW). auth_check reports what's actually loaded.
 export const INSTRUCTIONS = `# Starling Execution MCP — how to drive me
 
 I'm a LOCAL, non-custodial execution layer. You talk to me in plain language; I
@@ -40,10 +41,12 @@ back UNSIGNED txs you broadcast.
   solver delivers). Fully executed across both phases — the recommended way to bridge.
 - **build_withdraw(chain=hyperliquid)** — I execute HL's native withdraw3 to your OWN
   Arbitrum address (~5 min, $1 flat HL fee). Fully executed.
-- **enable_venue(polymarket)** — EXECUTES the one-time deposit-wallet setup GASLESSLY
-  via Polymarket's relayer: deploys your per-user deposit wallet + approves the V2
-  exchanges to spend its pUSD/outcome-tokens. Idempotent (skips what's already done),
-  nothing for you to broadcast. Needs the builder creds (STARLING_PM_BUILDER_*).
+- **enable_venue(polymarket)** — EXECUTES the one-time deposit-wallet setup: GASLESSLY
+  (via Polymarket's relayer) deploys your per-user deposit wallet + approves the V2
+  exchanges to spend its pUSD/outcome-tokens; then, if STARLING_PM_FUND_USDC is set,
+  AUTO-FUNDS the DW — the local EOA swaps its bridged native USDC -> USDC.e and wraps
+  it -> pUSD straight into the DW (EOA-signed, needs a little POL). Idempotent (skips
+  what's already done). Needs the builder creds (STARLING_PM_BUILDER_*).
 - **build_bridge / ensure_gas / plan_funding_route / build_withdraw(chain=polygon|
   solana)** — lower-level builders: I return UNSIGNED txs (recipients PINNED by me,
   never your argument) for you to sign + broadcast. Prefer 'transfer' for plain
@@ -92,8 +95,9 @@ open_position checks the caps BEFORE building, so a blocked trade never signs.
   fill has settled on-chain (tx 0x717c83b0…). ONE-TIME setup per wallet: call
   **enable_venue(polymarket)** — it gaslessly DEPLOYS your deposit wallet + APPROVES
   the V2 exchanges via the relayer (needs the builder creds STARLING_PM_BUILDER_API_KEY
-  /_SECRET/_PASSPHRASE; idempotent). Then FUND the deposit wallet with pUSD (wrap
-  USDC.e -> pUSD to that address) and open_position settles. Set
+  /_SECRET/_PASSPHRASE; idempotent), and — when STARLING_PM_FUND_USDC is set — AUTO-FUNDS
+  it: the EOA swaps its bridged native USDC -> USDC.e and wraps -> pUSD straight into the
+  DW (needs a little POL for those txs). Then open_position settles. Set
   STARLING_PM_DEPOSIT_WALLET=false only for a pre-registered bare-EOA/proxy.
 
 ## Funding & gas (WIRED — 'transfer'/'advance_bridge' EXECUTE; build_* are lower-level)
