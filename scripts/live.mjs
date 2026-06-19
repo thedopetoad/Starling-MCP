@@ -607,6 +607,47 @@ async function transfer() {
   return route();
 }
 
-const stages = { balances, swap, bridge, "hl-deposit": hlDeposit, "hl-trade": hlTrade, "hl-close": hlClose, "hl-withdraw": hlWithdraw, "pm-creds": pmCreds, "pm-enable": pmEnable, "enable-dw": enableDw, "poly-swap": polySwap, "pm-trade": pmTrade, route, cctp, transfer };
+// ── Polymarket NATIVE withdraw via bridge.polymarket.com — GASLESS, no deBridge ──
+// Transfer pUSD from the DW to the bridge's routing address via the relayer; the
+// bridge unwraps pUSD->USDC and delivers to Solana. The whole thing is EVM-side +
+// gasless (no POL, no unwrap/swap, no deBridge haircut). usage: pm-bridge-withdraw
+// <pUSDamount> [solanaRecipient] [--live]. Solana min is $2.
+async function pmBridgeWithdraw() {
+  const amt = arg || "2";
+  const toAddr = arg2 || A.solana; // default: our own Solana wallet
+  const { PolymarketBridge, PM_SOLANA_CHAIN_ID, SOLANA_USDC_MINT } = await import("../dist/adapters/polymarket-bridge.js");
+  const { deriveDepositWalletUUPS } = await import("../dist/adapters/polymarket-deposit-wallet.js");
+  const { PolymarketRelayer, builderCredsFromEnv, buildTransferPusdCall, PUSD } = await import("../dist/adapters/polymarket-relayer.js");
+  const signer = getEvmSigner("polymarket");
+  const dw = deriveDepositWalletUUPS(signer.address);
+  const dwPusd = await erc20Bal("polygon", PUSD, dw);
+  console.log(`PM native withdraw: ${amt} pUSD from DW ${dw} -> ${toAddr} (Solana) | DW pUSD: ${fmt(dwPusd, 6)}`);
+  const bridge = new PolymarketBridge();
+  const addrs = await bridge.getWithdrawAddress({ dwAddress: dw, toChainId: PM_SOLANA_CHAIN_ID, toTokenAddress: SOLANA_USDC_MINT, recipientAddr: toAddr });
+  console.log(`  bridge routing address (Polygon): ${addrs.evm}`);
+  if (!LIVE) return void console.log("\nDRY — would relayer-transfer pUSD to the bridge addr (gasless). --live to execute.");
+  const creds = builderCredsFromEnv();
+  if (!creds) throw new Error("no builder creds (STARLING_PM_BUILDER_*)");
+  const relayer = new PolymarketRelayer({ creds });
+  const amountRaw = BigInt(Math.round(Number(amt) * 1e6));
+  const solBefore = BigInt((await solRpc.getTokenBalance(toAddr, USDC_MINT).catch(() => null))?.amount ?? 0);
+  console.log(`  Solana USDC before: ${fmt(solBefore, 6)}`);
+  console.log("\n>>> RELAYER TRANSFER pUSD DW->bridge (gasless) <<<");
+  const sub = await relayer.submitBatch(signer, dw, [buildTransferPusdCall(addrs.evm, amountRaw)], Math.floor(Date.now() / 1000) + 1800);
+  const hash = await relayer.waitMined(sub.transactionID);
+  console.log("  https://polygonscan.com/tx/" + hash);
+  console.log("  polling Solana for bridge delivery (up to 5 min)…");
+  const deadline = Date.now() + 300_000;
+  for (;;) {
+    await sleep(10_000);
+    const now = BigInt((await solRpc.getTokenBalance(toAddr, USDC_MINT).catch(() => null))?.amount ?? 0);
+    const d = now - solBefore;
+    console.log(`  [${new Date().toISOString().slice(11, 19)}] Solana USDC Δ=${fmt(d, 6)}`);
+    if (d > 0n) return void console.log(`\n  ✓ DELIVERED ${fmt(d, 6)} USDC to Solana — gasless, no deBridge.`);
+    if (Date.now() > deadline) return void console.log("\n  not delivered yet; the bridge can take a few minutes. Re-check Solana USDC.");
+  }
+}
+
+const stages = { balances, swap, bridge, "hl-deposit": hlDeposit, "hl-trade": hlTrade, "hl-close": hlClose, "hl-withdraw": hlWithdraw, "pm-creds": pmCreds, "pm-enable": pmEnable, "enable-dw": enableDw, "poly-swap": polySwap, "pm-trade": pmTrade, "pm-bridge-withdraw": pmBridgeWithdraw, route, cctp, transfer };
 if (!stages[stage]) { console.log("stages:", Object.keys(stages).join(", ")); process.exit(1); }
 await stages[stage]();

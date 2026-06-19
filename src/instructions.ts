@@ -107,6 +107,14 @@ open_position checks the caps BEFORE building, so a blocked trade never signs.
 - **deBridge** — the mesh for everything else: Solana <-> EVM USDC, and native-gas
   top-ups on any chain. The solver delivers (no destination gas needed) for a
   small fee + a source fixFee.
+- **Polymarket native bridge** (bridge.polymarket.com) — for the PM venue ONLY, the
+  cheapest rail BY FAR. FUND the deposit wallet by sending any supported stable on any
+  chain (incl. Solana USDC) to its per-DW deposit address (POST /deposit) → Polymarket
+  settles pUSD INTO the DW, 1:1 and GASLESS (no POL / swap / wrap). WITHDRAW by
+  relayer-transferring pUSD from the DW to a /withdraw routing address → delivered to
+  the dest chain, 1:1 and GASLESS. Min $2 to Solana. Proven live 1:1 both ways
+  (src/adapters/polymarket-bridge.ts). Prefer this for PM in/out; deBridge/CCTP stay
+  for Hyperliquid + cross-venue moves.
 - Easiest: **transfer** (auto-rail, executes) → **advance_bridge** (drive to delivery).
   Lower-level: **bridge_quote** (fee/ETA/finality) → **build_bridge** → you broadcast
   → **get_bridge_status**. **ensure_gas** tops up native gas; **plan_funding_route**
