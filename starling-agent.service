@@ -11,7 +11,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/npx -y @starling/execution-mcp@1.0.0 serve
+# Clone + build Starling-MCP on the box first, then point ExecStart at the bin:
+#   git clone https://github.com/thedopetoad/Starling-MCP /opt/Starling-MCP
+#   cd /opt/Starling-MCP && npm install   # the prepare script builds dist/
+# Adjust both paths below if you cloned somewhere other than /opt/Starling-MCP.
+WorkingDirectory=/opt/Starling-MCP
+ExecStart=/usr/bin/node /opt/Starling-MCP/dist/bin/starling-mcp.js serve
 Environment=STARLING_UNLOCK_MODE=tpm
 Environment=STARLING_NETWORK=mainnet
 LoadCredentialEncrypted=starling_passphrase:/etc/starling/passphrase.cred

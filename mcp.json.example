@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "starling": {
-      "command": "npx",
-      "args": ["-y", "github:thedopetoad/Starling-MCP"],
+      "command": "node",
+      "args": ["/ABSOLUTE/PATH/TO/Starling-MCP/dist/bin/starling-mcp.js"],
       "env": {
         "STARLING_KEY_SOURCE": "auto",
         "STARLING_NETWORK": "testnet"

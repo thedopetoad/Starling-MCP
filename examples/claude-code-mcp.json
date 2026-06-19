@@ -1,10 +1,10 @@
 {
-  "//": "Claude Code: save as .mcp.json in your project root (or merge into ~/.claude.json).",
+  "//": "Claude Code: save as .mcp.json in your project root (or merge into ~/.claude.json). Clone Starling-MCP and run `npm install` (the prepare script builds to dist/), then point `args` at YOUR clone's dist/bin/starling-mcp.js.",
   "//env": "Pick ONE key source. The block below uses the encrypted keystore from `agent-wallet init` (recommended). To paste a plaintext key instead, see the commented `env`-source variant under examples/cursor-mcp.json — it works identically here.",
   "mcpServers": {
     "starling": {
-      "command": "npx",
-      "args": ["-y", "github:thedopetoad/Starling-MCP"],
+      "command": "node",
+      "args": ["/ABSOLUTE/PATH/TO/Starling-MCP/dist/bin/starling-mcp.js"],
       "env": {
         "STARLING_KEY_SOURCE": "auto",
         "STARLING_NETWORK": "testnet",

@@ -1,7 +1,7 @@
 {
   "name": "@starling/execution-mcp",
   "version": "1.0.0",
-  "description": "The Execution Layer for Agentic Trading — a local, non-custodial MCP server your bot connects to. Reads the encrypted keystore created by agent-wallet and signs locally; keys never leave your box.",
+  "description": "The Execution Layer for Agentic Trading — a local, non-custodial MCP your bot connects to. Reads the encrypted keystore created by agent-wallet and signs locally; keys never leave your box.",
   "type": "module",
   "engines": {
     "node": ">=20"

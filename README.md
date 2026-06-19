@@ -1,64 +1,70 @@
 # Starling Execution MCP
 
 **The Execution Layer for Agentic Trading.** A local, non-custodial
-[MCP](https://modelcontextprotocol.io) server your trading bot connects to over
-stdio. It signs **locally** and **never holds your funds**. Point a coding agent
-(Claude Code, Cursor, Claude Desktop) or your own bot at it and talk to your
-money in plain English: *"bridge $100 to Solana and top up gas,"* *"buy $50 YES
-on \<market\> under 40c."*
+[MCP](https://modelcontextprotocol.io) your trading bot connects to over stdio.
+It signs **locally** and **never holds your funds**. Clone it, build it, run it
+yourself — then point a coding agent (Claude Code, Cursor, Claude Desktop) or
+your own bot at it and talk to your money in plain English: *"bridge $100 to
+Solana and top up gas,"* *"buy $50 YES on \<market\> under 40c."*
 
 It's built to work for *everyone*: the MCP is **modular about where your keys
 come from** — paste a plaintext key and go, or layer in the encrypted
 [Agent-Wallet-Setup](https://github.com/thedopetoad/Agent-Wallet-Setup) keystore
-when you want safety. Same server, same signing, either way.
+when you want safety. Same code, same signing, either way.
 
 ---
 
 ## Quickstart for coding agents
 
-Download-and-play in five steps. **Testnet-first** — you don't risk a cent until
+Clone-and-play in five steps. **Testnet-first** — you don't risk a cent until
 you flip to mainnet on purpose.
 
 > **Prerequisite:** Node 20+ on your `PATH`. MCP hosts (Claude Desktop, Cursor,
-> Claude Code) do **not** bundle Node — run `node -v` to confirm. `npx
-> github:thedopetoad/Starling-MCP doctor` checks this and your key source.
+> Claude Code) do **not** bundle Node — run `node -v` to confirm. `node
+> dist/bin/starling-mcp.js doctor` (after step 1) checks this and your key source.
 
-**1. Get the server.** You don't have to clone anything — `npx` fetches, builds,
-and runs it from GitHub on demand (step 3 does this for you). To poke it by hand:
+**1. Clone and build it.** `npm install` runs the `prepare` script, which builds
+the TypeScript to `dist/`. Then the entrypoint is `dist/bin/starling-mcp.js`:
 
 ```bash
-npx -y github:thedopetoad/Starling-MCP doctor    # Node + key-source + hygiene check
-# (clone instead if you want to hack on it: git clone … && npm install && npm run build)
+git clone https://github.com/thedopetoad/Starling-MCP
+cd Starling-MCP
+npm install                                # the prepare script builds to dist/
+node dist/bin/starling-mcp.js doctor       # Node + key-source + hygiene check
 ```
 
 **2. Make a wallet** (optional but recommended). This generates per-chain keys
-and seals them in an encrypted keystore — nothing to install but Node:
+and seals them in an encrypted keystore. Clone + build Agent-Wallet-Setup the
+same way (`git clone … && cd Agent-Wallet-Setup && npm install`), then run its
+`init`:
 
 ```bash
-npx -y github:thedopetoad/Agent-Wallet-Setup init
+git clone https://github.com/thedopetoad/Agent-Wallet-Setup
+cd Agent-Wallet-Setup && npm install
+node dist/bin/agent-wallet.js init
 ```
 
 Skip this and paste a plaintext key instead (see *easy path* below) — the
 read-only tools work with **no keys at all**, so you can wire things up first.
 
 **3. Add ONE block to your MCP host.** Copy the matching file from
-[`examples/`](./examples) — they're ready to paste:
+[`examples/`](./examples) and replace `/ABSOLUTE/PATH/TO/Starling-MCP` with
+wherever YOU cloned it:
 
 - **Claude Code** → save [`examples/claude-code-mcp.json`](./examples/claude-code-mcp.json) as `.mcp.json` in your project root.
 - **Cursor** → [`examples/cursor-mcp.json`](./examples/cursor-mcp.json) (Settings → MCP → Add, or `.cursor/mcp.json`).
 - **Claude Desktop** → merge [`examples/claude-desktop-mcp.json`](./examples/claude-desktop-mcp.json) into `claude_desktop_config.json` (Settings → Developer → Edit Config), then restart.
 
-The canonical block (npx, no clone):
+The canonical block — `node` runs the build from your local clone (swap in the
+real path):
 
 ```json
 { "mcpServers": { "starling": {
-  "command": "npx",
-  "args": ["-y", "github:thedopetoad/Starling-MCP"],
+  "command": "node",
+  "args": ["/ABSOLUTE/PATH/TO/Starling-MCP/dist/bin/starling-mcp.js"],
   "env": { "STARLING_KEY_SOURCE": "auto", "STARLING_NETWORK": "testnet" }
 } } }
 ```
-
-(Local clone instead: `"command": "node", "args": ["/path/to/Starling-MCP/dist/bin/starling-mcp.js"]`.)
 
 **4. Fund it.** Send testnet (or, deliberately, mainnet) USDC + a little native
 gas to the addresses the server reports. Ask your agent: *"what are your wallet
@@ -90,7 +96,7 @@ STARLING_KEY_SOURCE=env \
 STARLING_PK_POLYGON=0x… \
 STARLING_PK_HYPERLIQUID=0x… \
 STARLING_PK_SOLANA=<base58|hex> \
-  npx -y github:thedopetoad/Starling-MCP verify   # prints the addresses it loaded
+  node dist/bin/starling-mcp.js verify   # prints the addresses it loaded
 ```
 
 The same three `STARLING_PK_*` vars go straight in the `env` block of any
@@ -101,33 +107,44 @@ The same three `STARLING_PK_*` vars go straight in the `env` block of any
 ## What the agent can do
 
 You drive Starling in natural language; the agent picks the tool. **Honest
-status:** the read-only *trust-layer* tools below are **live today** and are what
-you should run first — they prove the wallet→MCP handshake without moving funds.
-The money-moving tools are the documented execution surface this server is being
-built toward (Polymarket → Hyperliquid → Solana, with CCTP V2 + deBridge for
-funding); they build on the **same** local-signer contract. Check what's actually
-exposed at any moment by asking your agent to *list its tools*, or run `npx -y
-github:thedopetoad/Starling-MCP` and call `tools/list`.
+status:** the read-only *trust-layer* tools below are what you should run first —
+they prove the wallet→MCP handshake without moving funds. The money-moving +
+venue tools are **wired** (Polymarket CLOB V2 build→sign→submit, Hyperliquid L1
+actions, Jupiter/Solana swaps, CCTP V2 + deBridge for funding — all built on the
+**same** local-signer contract). Each one only activates once its venue's signer
+(and, for the bridges, the chain RPCs) are loaded — until then it returns a clean
+*"not enabled this run"* rather than failing. Check what's actually exposed and
+active at any moment by asking your agent to *list its tools*, or run the MCP and
+call `tools/list`.
 
-**Live now — read-only handshake (no keys required):**
+**Read-only trust layer (no keys required) — run these first:**
 
 | ask your agent… | tool | what happens |
 |---|---|---|
-| *"Are you authed? Which venues have a signer?"* | `auth_check` | network, active key source, per-venue signer status |
+| *"Read your instructions."* | `get_instructions` | call order, the no-key vs key boundary, safety rules — read FIRST |
+| *"Are you authed? Which venues have a signer?"* | `auth_check` | network, active key source, unlock mode, per-venue signer status, gas-reserve, withdraw destination |
 | *"What are your wallet addresses?"* | `get_wallet_addresses` | the public address per venue |
+| *"Where do withdraws go?"* | `request_withdraw_address` | reports the current withdraw destination (per chain: address, source, 4-byte commitment); takes NO address argument |
 | *"Are you alive?"* | `ping` | liveness + server clock |
 
-**The execution surface it's built toward** (same signing contract; testnet-first):
+**Money-moving + venue tools** (same signing contract; testnet-first; require the
+relevant signer loaded):
 
-| ask your agent… | tool (planned) | what it does |
+| ask your agent… | tool | what it does |
 |---|---|---|
-| *"What's the best price for $50 of YES on \<market\>?"* | `get_quote` | reads venue book; returns price + a bounded worst-price |
-| *"Buy $50 YES on \<market\> under 40c."* | `open_position` | builds an EIP-712 CLOB order (PM) / signed action (HL), signs locally, posts |
-| *"Close half my BTC perp at no worse than 60k."* | `close_position` | builds + signs the exit with an explicit worst price |
-| *"What do I hold and what's my PnL?"* | `get_positions` | normalized open positions across venues |
-| *"Bridge $100 of USDC to Solana and top up gas."* | `bridge_funds` | CCTP V2 burn-and-mint for USDC + a small deBridge native-output leg for SOL/MATIC/ETH gas |
-| *"Where's my bridge? Is it ready to trade?"* | `check_venue_status` | on-chain confirmation + venue preconditions (not just a mint balance) |
-| *"Sweep everything back to my treasury."* | `build_withdraw_tx` | destination is the **sealed treasury only** — the agent cannot name a recipient |
+| *"What's the best price for $50 of YES on \<market\>?"* | `get_quote` | reads venue metadata + price so the caller can derive a worst-price (read-only) |
+| *"Buy $50 YES on \<market\> under 40c."* | `open_position` | builds an EIP-712 CLOB order (PM) / signed action (HL) / Solana tx (Jupiter), signs locally, submits |
+| *"Close half my BTC perp at no worse than 60k."* | `close_position` | builds + signs the exit for a fraction (0,1] with an explicit worst price, then submits |
+| *"What do I hold and what's my PnL?"* | `list_positions` | normalized open positions across venues (pass `marketIds` to read specific ones) |
+| *"Get this fresh wallet ready to trade Polymarket."* | `enable_venue` | builds the UNSIGNED on-chain setup a fresh EOA needs (PM approvals + pUSD wrap + deposit-wallet registry; HL deposit; Jupiter ATA) + a `blockers[]` to poll |
+| *"What's the fee/ETA to bridge $100 USDC to Solana?"* | `bridge_quote` | fee/ETA/finality for a USDC (CCTP) or non-USDC (deBridge) route (read-only) |
+| *"Bridge $100 of USDC home."* | `build_bridge` | builds the UNSIGNED bridge legs ([approve?, depositForBurn] CCTP / [create] deBridge); recipient pinned by the MCP, not an argument |
+| *"Move $50 USDC from Polygon to my Solana wallet."* | `transfer` | moves USDC between YOUR OWN wallets, auto-picking the rail (CCTP vs deBridge); recipient is your own address, never an argument |
+| *"Top up native gas on Solana."* | `ensure_gas` | builds a deBridge native-output top-up to the per-chain gas floor (paid from USDC), or an empty list if already funded |
+| *"Plan funding a fresh EOA on Hyperliquid with $100."* | `plan_funding_route` | ordered UNSIGNED legs: USDC over CCTP + a deBridge native-gas leg, so the dest can trade AND pay gas |
+| *"Where's my bridge? Is it ready to trade?"* | `get_bridge_status` | on-chain confirmation + the FULL venue-precondition set (`readyToTrade`), not just a mint balance |
+| *"Drive that bridge to completion."* | `advance_bridge` | polls the flight and, for CCTP, broadcasts the mint once Iris attests; call until `delivered=true` |
+| *"Sweep everything back to my treasury."* | `build_withdraw` | destination is the **sealed treasury / pinned file only** — the agent cannot name a recipient |
 
 > **Every order carries an explicit worst price.** There is no "market" order
 > anywhere in this stack — slippage is always bounded. *"under 40c"*, *"no worse
@@ -204,14 +221,25 @@ Nothing else in the server changes — that's the whole point of the layer.
 Solana key formats accepted: base58 (32-byte seed or 64-byte secret key) or hex.
 EVM: 32-byte hex, with or without `0x`.
 
-## Polymarket: bring your own builder creds
+## Polymarket: bring your own creds
 
-Trading Polymarket V2 from a deposit wallet uses Polymarket's **relayer** (it deploys
-your deposit wallet and sets its approvals **gaslessly**) and stamps a **builder
-code** on every order. If you run your own bot, **create your OWN builder API
-credentials** from your Polymarket account (polymarket.com → Settings → Builder):
-orders attributed to your builder code earn *you* the better maker rates / rebates,
-and the credentials are what authorize the gasless relayer flow. Set them in the env:
+Polymarket V2 has three independent env knobs. The defaults are the right choice
+for a self-custodied bot — you only *have* to set the CLOB L2 creds to place orders.
+
+**1. Deposit-wallet mode (default) vs bare EOA.** By default the adapter trades
+through a **deposit wallet** (a UUPS contract deterministically derived from your
+local Polygon EOA), signing each order as `POLY_1271` (signatureType 3). The EOA
+self-signs the order and self-posts it to the CLOB — Polymarket's relayer is **not**
+on the order-placement path. Set `STARLING_PM_DEPOSIT_WALLET=false` to fall back to
+the legacy bare-EOA path (signatureType 0), where signer == maker == your EOA.
+
+**2. The gasless relayer (deposit-wallet enable + cash-out).** Deploying the deposit
+wallet and setting its on-chain approvals — and pulling pUSD back out of it — go
+through Polymarket's **relayer**, which executes those calls **gaslessly** against an
+EIP-712 batch your EOA signs. `enable_venue` drives the deploy + approvals; the
+relayer is **only** used for that setup and cash-out, never for order placement. It
+needs **builder API credentials** from your own Polymarket account (polymarket.com →
+Settings → Builder):
 
 ```
 STARLING_PM_BUILDER_API_KEY=…
@@ -220,19 +248,39 @@ STARLING_PM_BUILDER_PASSPHRASE=…
 ```
 
 These are HMAC secrets — keep them out of the repo (the `.gitignore` already blocks
-`.env*`; put them in your `env`-source file or secrets manager). Without your own,
-you forgo the attribution **and** the better economics.
+`.env*`; put them in your `env`-source file or secrets manager). If you run bare-EOA
+mode (`STARLING_PM_DEPOSIT_WALLET=false`) against a pre-enabled wallet you can skip
+them.
+
+**3. Order attribution (`STARLING_PM_BUILDER_CODE`).** A separate **bytes32 builder
+code** stamped on every order for attribution — orders carrying your code earn *you*
+the better maker rates / rebates. This is distinct from the HMAC builder API creds
+above; leave it unset to forgo attribution (orders still place fine).
+
+**4. CLOB L2 creds (required to POST orders).** Placing an order on the CLOB needs
+L2 API credentials for the maker address:
+
+```
+STARLING_PM_CLOB_API_KEY=…
+STARLING_PM_CLOB_SECRET=…        # url-safe base64
+STARLING_PM_CLOB_PASSPHRASE=…
+```
+
+Without these, `open_position` / `close_position` build + sign the order but cannot
+submit it and return a clear "no CLOB L2 creds" error.
 
 ## Tools
 
 See [What the agent can do](#what-the-agent-can-do) for the prompt-driven list.
-In short: the read-only trust-layer tools (`auth_check`, `get_wallet_addresses`,
-`ping`) are **live now** and prove the handshake without moving funds; the
-money-moving venue tools (`get_quote`, `open_position`, `close_position`,
-`bridge_funds`, `build_withdraw_tx`, … across Polymarket / Hyperliquid / Solana)
-build on the same `getEvmSigner()` / `getSolanaSigner()` contract and are the
-in-progress milestones. Ask your agent to *list its tools* to see exactly what's
-exposed right now.
+In short: the read-only trust-layer tools (`get_instructions`, `auth_check`,
+`get_wallet_addresses`, `request_withdraw_address`, `ping`) prove the handshake
+without moving funds; the money-moving + venue tools (`get_quote`,
+`open_position`, `close_position`, `list_positions`, `enable_venue`,
+`bridge_quote`, `build_bridge`, `transfer`, `ensure_gas`, `plan_funding_route`,
+`get_bridge_status`, `advance_bridge`, `build_withdraw` — across Polymarket /
+Hyperliquid / Solana) build on the same `getEvmSigner()` / `getSolanaSigner()`
+contract. Each activates once its venue's signer (and bridge RPCs) are loaded.
+Ask your agent to *list its tools* to see exactly what's exposed right now.
 
 Watch it live with the [Starling Agent Dashboard](https://github.com/thedopetoad/Starling-Agent-Dashboard).
 
@@ -259,10 +307,13 @@ real protection is thin, trade-not-withdraw, expiring wallets.
 
 ## Commands
 
+Run from your clone after `npm install` (which builds `dist/`). The bin dispatches
+three subcommands; no argument is the same as `serve`:
+
 ```
-starling-mcp            start the stdio MCP server (what your agent host launches)
-starling-mcp verify     unlock the active key source and print derived addresses
-starling-mcp doctor     hygiene checks (Node, key source, perms, NEXT_PUBLIC leak)
+node dist/bin/starling-mcp.js            start the stdio MCP (what your agent host launches)
+node dist/bin/starling-mcp.js verify     unlock the active key source and print derived addresses
+node dist/bin/starling-mcp.js doctor     hygiene checks (Node, key source, perms, NEXT_PUBLIC leak)
 ```
 
 ## Security invariants

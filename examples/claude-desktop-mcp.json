@@ -1,10 +1,11 @@
 {
   "//": "Claude Desktop: Settings -> Developer -> Edit Config opens claude_desktop_config.json. Paste this `mcpServers` block (merge if you already have one) and fully restart Claude Desktop.",
-  "//node": "Claude Desktop does NOT bundle Node. You need Node 20+ on your PATH or `npx` won't be found. Run `node -v` in a terminal first; if missing, install from nodejs.org. On macOS, GUI apps sometimes don't inherit your shell PATH — if `npx` isn't found, replace \"npx\" with the absolute path printed by `which npx`.",
+  "//clone": "Clone Starling-MCP and run `npm install` first (the prepare script builds to dist/). Then replace /ABSOLUTE/PATH/TO/Starling-MCP below with wherever YOU cloned it — `args` must point at that clone's dist/bin/starling-mcp.js.",
+  "//node": "Claude Desktop does NOT bundle Node. You need Node 20+ on your PATH or `node` won't be found. Run `node -v` in a terminal first; if missing, install from nodejs.org. On macOS, GUI apps sometimes don't inherit your shell PATH — if `node` isn't found, replace \"node\" with the absolute path printed by `which node`.",
   "mcpServers": {
     "starling": {
-      "command": "npx",
-      "args": ["-y", "github:thedopetoad/Starling-MCP"],
+      "command": "node",
+      "args": ["/ABSOLUTE/PATH/TO/Starling-MCP/dist/bin/starling-mcp.js"],
       "env": {
         "STARLING_KEY_SOURCE": "auto",
         "STARLING_NETWORK": "testnet",

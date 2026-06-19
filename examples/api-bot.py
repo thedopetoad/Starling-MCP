@@ -3,16 +3,16 @@
 api-bot.py — a minimal trading bot that drives the Starling Execution MCP with Claude.
 
 What it shows, end to end:
-  1. Launch the Starling MCP as a child process over **stdio** (no clone — npx
-     fetches + runs it straight from GitHub).
+  1. Launch the Starling MCP as a child process over **stdio** (from your local
+     clone's built `dist/bin/starling-mcp.js`).
   2. List its tools and hand them to Claude as native tool definitions.
   3. Run a tiny agent loop: the model decides which Starling tool to call, we
      execute it over the MCP connection, feed the result back, repeat.
 
 This is the read-only "prove the handshake" path you should run FIRST: it calls
-`auth_check` / `get_wallet_addresses` / `ping`, which never move money. Once the
-money-moving tools (open_position, get_quote, bridge_funds, ...) are live, the
-exact same loop drives them — you only change the prompt.
+`auth_check` / `get_wallet_addresses` / `ping`, which never move money. The
+money-moving tools (open_position, get_quote, build_bridge, ...) are driven by
+the exact same loop — you only change the prompt.
 
 Honest notes:
   * Default network is **testnet** and keys are optional for the read-only tools.
@@ -25,7 +25,8 @@ Run:
     export ANTHROPIC_API_KEY=sk-ant-...
     python examples/api-bot.py "What wallet addresses do you have, and are you authed?"
 
-Requires Node 20+ on PATH (npx fetches the server).
+Requires a local clone built via `npm install` (the prepare script builds to
+dist/) and Node 20+ on PATH. Edit STARLING_BIN below to point at YOUR clone.
 """
 from __future__ import annotations
 
@@ -42,12 +43,14 @@ from mcp.client.stdio import stdio_client
 MODEL = "claude-sonnet-4-5"
 
 # How we launch the Starling MCP. This is the SAME command your mcp.json uses —
-# `npx -y github:thedopetoad/Starling-MCP` builds + runs the server from GitHub.
-# Swap to a local clone with:
-#   command="node", args=["/path/to/Starling-MCP/dist/bin/starling-mcp.js"]
+# `node <clone>/dist/bin/starling-mcp.js` runs the MCP you built locally with
+# `npm install`. Point STARLING_BIN at YOUR clone (or set it in the env).
+STARLING_BIN = os.environ.get(
+    "STARLING_BIN", "/ABSOLUTE/PATH/TO/Starling-MCP/dist/bin/starling-mcp.js"
+)
 SERVER = StdioServerParameters(
-    command="npx",
-    args=["-y", "github:thedopetoad/Starling-MCP"],
+    command="node",
+    args=[STARLING_BIN],
     env={
         **os.environ,
         "STARLING_KEY_SOURCE": os.environ.get("STARLING_KEY_SOURCE", "auto"),

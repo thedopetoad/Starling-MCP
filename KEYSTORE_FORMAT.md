@@ -2,7 +2,7 @@
 
 This file is the **contract between [Agent-Wallet-Setup](https://github.com/thedopetoad/Agent-Wallet-Setup)
 (the producer) and [Starling-MCP](https://github.com/thedopetoad/Starling-MCP)
-(the consumer)**. The wallet tool writes these envelopes; the MCP server reads
+(the consumer)**. The wallet tool writes these envelopes; the MCP reads
 and decrypts them to sign. `src/keystore/crypto.ts` is kept **byte-identical**
 in both repos and both ship the same decryption test vector
 (`src/keystore/vectors.ts`), so any drift breaks CI in one of them.

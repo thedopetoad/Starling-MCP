@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // src/bin/starling-mcp.ts — entrypoint.
-//   starling-mcp            start the stdio MCP server (default)
+//   starling-mcp            start the stdio MCP (default)
 //   starling-mcp serve      same
 //   starling-mcp verify     unlock the keystore and print derived addresses (JSON)
 //   starling-mcp doctor     hygiene checks
@@ -11,7 +11,7 @@ const VERSION = "1.0.0";
 const HELP = `Starling execution MCP — connect your trading bot to every venue.
 
 Usage:
-  starling-mcp            Start the stdio MCP server (what your agent host launches)
+  starling-mcp            Start the stdio MCP (what your agent host launches)
   starling-mcp verify     Unlock the local keystore and print derived addresses
   starling-mcp doctor     Hygiene checks
   starling-mcp --version
