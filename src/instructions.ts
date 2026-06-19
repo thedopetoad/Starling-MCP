@@ -47,6 +47,13 @@ back UNSIGNED txs you broadcast.
   AUTO-FUNDS the DW — the local EOA swaps its bridged native USDC -> USDC.e and wraps
   it -> pUSD straight into the DW (EOA-signed, needs a little POL). Idempotent (skips
   what's already done). Needs the builder creds (STARLING_PM_BUILDER_*).
+- **pm_deposit_address / pm_withdraw** — the NATIVE Polymarket bridge tools, the
+  CHEAPEST PM rail (gasless, 1:1, no swap/wrap/deBridge). pm_deposit_address (read-only)
+  returns the deposit wallet's per-chain deposit addresses — send Solana/EVM USDC to the
+  matching one and pUSD settles INTO the DW. pm_withdraw(toChain, amount) sweeps pUSD
+  from the DW to the SEALED TREASURY gaslessly: polygon = same-chain relayer transfer;
+  solana/hyperliquid = via bridge.polymarket.com. NO recipient arg; idempotent; $2 min
+  cross-chain. Prefer these over build_bridge/deBridge for funding + draining Polymarket.
 - **build_bridge / ensure_gas / plan_funding_route / build_withdraw(chain=polygon|
   solana)** — lower-level builders: I return UNSIGNED txs (recipients PINNED by me,
   never your argument) for you to sign + broadcast. Prefer 'transfer' for plain

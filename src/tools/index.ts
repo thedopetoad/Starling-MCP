@@ -188,6 +188,36 @@ export interface VenueEnabler {
   }>;
 }
 
+/** Per-DW deposit addresses from the NATIVE Polymarket bridge (bridge.polymarket.com). */
+export interface PmDepositInfo {
+  depositWallet: string;
+  /** Address family per source-chain kind: send Solana USDC -> svm, EVM USDC -> evm. */
+  addresses: { evm: string; svm: string; tron: string; btc: string };
+  note: string;
+}
+
+export interface PmWithdrawResult {
+  ok: boolean;
+  txHash?: string;
+  deliveredToChain: Chain;
+  /** The pinned treasury address the funds were sent to (never an agent argument). */
+  recipient: string;
+  blockers: string[];
+  note: string;
+}
+
+/**
+ * The NATIVE Polymarket bridge ops (bridge.polymarket.com) — the gasless, 1:1 rail
+ * for funding + draining a deposit wallet (vs the deBridge+swap+wrap path). Deposit
+ * is address-lookup only (the caller sends funds to the returned address); withdraw
+ * EXECUTES a gasless relayer pUSD transfer to a bridge routing address. The recipient
+ * is pinned by the tool layer (sealed treasury), never chosen here.
+ */
+export interface PmBridgeOps {
+  depositAddresses(): Promise<PmDepositInfo>;
+  withdraw(args: { amount: string; toChain: Chain; recipient: string }): Promise<PmWithdrawResult>;
+}
+
 /**
  * Everything the tools need, injected. server.ts constructs this once after
  * bootUnlock() and passes it on every call. Keeping it injected (vs importing
@@ -208,6 +238,8 @@ export interface ToolDeps {
   gas: GasPlanner;
   funding: FundingPlanner;
   enabler: VenueEnabler;
+  /** Native Polymarket bridge (gasless 1:1 PM deposit/withdraw). */
+  pmBridge: PmBridgeOps;
   /** Signs + broadcasts + confirms the UNSIGNED on-chain legs the builders produce
    *  (bridge / gas / venue-setup / EVM+SOL sweep), under inspect-before-sign. This
    *  is what lets the on-chain tools EXECUTE instead of handing back unsigned txs. */
@@ -442,6 +474,34 @@ export const MONEY_TOOLS = [
         ...IDEMPOTENCY,
       },
       required: ["venue", "idempotencyKey"],
+    },
+  },
+  {
+    name: "pm_deposit_address",
+    description:
+      "Read-only: the Polymarket deposit wallet's NATIVE bridge deposit addresses (bridge.polymarket.com), " +
+      "one per source-chain kind {evm, svm, tron, btc}. Send any supported stable on any supported chain " +
+      "(e.g. Solana USDC -> svm, Polygon/EVM USDC -> evm) to the matching address and Polymarket settles pUSD " +
+      "INTO the deposit wallet — GASLESS, 1:1, no swap/wrap/deBridge. The cheapest way to fund Polymarket. " +
+      "Min ~$2 cross-chain. No build, no idempotency key.",
+    inputSchema: { type: "object" as const, properties: {} },
+  },
+  {
+    name: "pm_withdraw",
+    description:
+      "Withdraw pUSD from the Polymarket deposit wallet to the SEALED TREASURY, GASLESSLY, via the native " +
+      "bridge. toChain=polygon is a same-chain relayer transfer to the treasury; cross-chain (solana / " +
+      "hyperliquid) routes through bridge.polymarket.com (1:1, no deBridge haircut, no POL). Takes NO recipient " +
+      "argument — the destination is the pinned treasury for that chain. Min $2 cross-chain. Idempotent: a " +
+      "replayed key is NOT re-sent.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        toChain: { ...CHAIN_ENUM, description: "Destination chain. Its treasury address receives the funds." },
+        amount: { ...STR, description: "Decimal pUSD to withdraw from the deposit wallet." },
+        ...IDEMPOTENCY,
+      },
+      required: ["toChain", "amount", "idempotencyKey"],
     },
   },
   {
@@ -1117,6 +1177,58 @@ async function handleEnableVenue(deps: ToolDeps, a: Args): Promise<ToolText> {
   });
 }
 
+async function handlePmDepositAddress(deps: ToolDeps, _a: Args): Promise<ToolText> {
+  if (!deps.signerLoaded("polymarket")) {
+    return fail("signer_missing", "no polygon signer loaded for polymarket; see auth_check");
+  }
+  const info = await deps.pmBridge.depositAddresses();
+  return ok({ ok: true, ...info });
+}
+
+async function handlePmWithdraw(deps: ToolDeps, a: Args): Promise<ToolText> {
+  const toChain = reqEnum(a, "toChain", CHAINS) as Chain;
+  const amount = reqStr(a, "amount");
+  const idempotencyKey = reqStr(a, "idempotencyKey");
+  if (!deps.signerLoaded("polymarket")) {
+    return fail("signer_missing", "no polygon signer loaded for polymarket; see auth_check");
+  }
+
+  // Recipient is the SEALED TREASURY for toChain — NEVER an agent argument (same
+  // chokepoint as build_withdraw). resolveWithdrawRecipient throws on conflict /
+  // unset rather than ever returning an agent-supplied address.
+  let recipient: string;
+  try {
+    const treasury = await deps.treasury();
+    recipient = resolveWithdrawRecipient(treasury, { chain: toChain, amount }).recipient;
+  } catch (e) {
+    if (e instanceof WithdrawError) return fail("treasury_refused", e.message, { withdrawCode: e.code });
+    throw e;
+  }
+
+  // Reserve the intent FIRST so a replayed key can NEVER re-submit the withdraw.
+  const { replayed } = await reserveIntent(deps, idempotencyKey, "withdraw");
+  if (replayed) {
+    return ok({
+      ok: true,
+      replayed: true,
+      toChain,
+      note:
+        "idempotencyKey already used — the pm_withdraw was already submitted and is NOT re-sent (no " +
+        "double-withdraw). Check the destination balance; use a NEW key to withdraw again.",
+    });
+  }
+
+  const res = await deps.pmBridge.withdraw({ amount, toChain, recipient });
+  await deps.store.patch(deps.botId, idempotencyKey, {
+    state: res.ok ? "FILLED" : "FAILED",
+    txHashes: res.txHash ? [res.txHash] : [],
+  });
+  if (!res.ok) {
+    return fail("internal", res.blockers.join("; ") || "pm_withdraw failed", { blockers: res.blockers, recipient, note: res.note });
+  }
+  return ok({ ok: true, replayed: false, toChain, amount, recipient, txHash: res.txHash, note: res.note });
+}
+
 async function handleTransfer(deps: ToolDeps, a: Args): Promise<ToolText> {
   const fromChain = reqEnum(a, "fromChain", CHAINS) as Chain;
   const toChain = reqEnum(a, "toChain", CHAINS) as Chain;
@@ -1223,6 +1335,10 @@ export async function handleMoneyTool(name: string, rawArgs: unknown, deps: Tool
         return await handlePlanFundingRoute(deps, a);
       case "enable_venue":
         return await handleEnableVenue(deps, a);
+      case "pm_deposit_address":
+        return await handlePmDepositAddress(deps, a);
+      case "pm_withdraw":
+        return await handlePmWithdraw(deps, a);
       case "transfer":
         return await handleTransfer(deps, a);
       case "advance_bridge":

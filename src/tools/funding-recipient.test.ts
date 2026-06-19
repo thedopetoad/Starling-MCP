@@ -52,6 +52,7 @@ function depsWith(t: SealedTreasury): ToolDeps {
       },
     }),
     enabler: makeRealVenueEnabler(),
+    pmBridge: { async depositAddresses() { throw new Error("unused"); }, async withdraw() { throw new Error("unused"); } },
     executor: { async exec() { throw new Error("unused"); }, async execSequence() { return []; } },
     dailyRelayerQuota: 100,
     signerLoaded: () => true,

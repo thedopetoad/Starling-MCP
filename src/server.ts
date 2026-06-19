@@ -23,6 +23,7 @@ import { polymarketAdapter } from "./adapters/polymarket.js";
 import { hyperliquidAdapter } from "./adapters/hyperliquid.js";
 import { jupiterAdapter } from "./adapters/jupiter.js";
 import { makeRealVenueEnabler } from "./adapters/venue-enabler.js";
+import { makeRealPmBridge } from "./adapters/pm-bridge-ops.js";
 import { DeBridgeBridge } from "./bridge/debridge.js";
 import { cctpBridge } from "./bridge/cctp.js";
 import type { NativeBalanceReader } from "./bridge/gas.js";
@@ -225,6 +226,8 @@ export function buildToolDeps(): ToolDeps {
     gas: makeGasPlanner({ readNativeBalance, sourceAddressFor }),
     funding: makeFundingPlanner({ readNativeBalance, sourceAddressFor }),
     enabler: makeRealVenueEnabler(),
+    // Native Polymarket bridge — gasless 1:1 deposit-address lookup + pUSD withdraw.
+    pmBridge: makeRealPmBridge(),
     // Signs + broadcasts + confirms the on-chain legs locally (same broadcasters
     // the harness uses). The on-chain tools call this to EXECUTE, not just build.
     executor: makeExecutor(),

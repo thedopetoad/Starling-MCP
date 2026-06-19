@@ -64,6 +64,19 @@ const stages = {
   async enable() {
     show(await call("enable_venue", { venue: a[0] || "polymarket", idempotencyKey: key("enable") }));
   },
+  // pm_deposit_address — read-only: the native bridge deposit addresses for the DW.
+  async ["pm-deposit-addr"]() {
+    show(await call("pm_deposit_address", {}));
+  },
+  // pm_withdraw — GASLESS native pUSD withdraw from the DW to the SEALED TREASURY.
+  // usage: pm-withdraw <polygon|solana|hyperliquid> <pUSDamount> [--live]
+  async ["pm-withdraw"]() {
+    const toChain = a[0] || "solana";
+    const amt = a[1] || "2";
+    console.log(`pm_withdraw ${amt} pUSD -> sealed treasury on ${toChain} (gasless native bridge)`);
+    if (!LIVE) return console.log("DRY — re-run with --live (needs a pinned treasury for that chain).");
+    show(await call("pm_withdraw", { toChain, amount: amt, idempotencyKey: key("pmw") }));
+  },
   // DRY-build a Polymarket order through the ADAPTER (no post) and prove it's a
   // deposit-wallet order: maker == the derived DW, signatureType 3, ERC-7739 sig.
   async ["pm-build"]() {

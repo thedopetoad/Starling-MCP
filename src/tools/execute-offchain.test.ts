@@ -66,6 +66,7 @@ function makeDeps(adapter: VenueAdapter): ToolDeps {
     gas: makeGasPlanner({ readNativeBalance: async () => "0", sourceAddressFor: () => null }),
     funding: makeFundingPlanner({ readNativeBalance: async () => "0", sourceAddressFor: () => null }),
     enabler: makeRealVenueEnabler(),
+    pmBridge: { async depositAddresses() { throw new Error("unused"); }, async withdraw() { throw new Error("unused"); } },
     executor: { async exec() { throw new Error("executor not used in this test"); }, async execSequence() { return []; } },
     dailyRelayerQuota: 100,
     signerLoaded: () => true,
