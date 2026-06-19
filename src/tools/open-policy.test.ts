@@ -57,7 +57,6 @@ function makeDeps(limits: RiskLimits): ToolDeps {
     executor: { async exec() { throw new Error("executor not used in this test"); }, async execSequence() { return []; } },
     dailyRelayerQuota: 100,
     signerLoaded: () => true,
-    withdrawMaxPerCall: () => "0",
     limits: () => limits,
     dailyUsage: (): DailyUsage => ({ dayKey: "2026-06-15", openedNotionalUsd: opened, realizedLossUsd: "0" }),
     recordOpen: (n) => {

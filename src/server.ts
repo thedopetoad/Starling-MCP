@@ -193,8 +193,6 @@ export function buildToolDeps(): ToolDeps {
     executor: makeExecutor(),
     dailyRelayerQuota: Number(process.env.STARLING_RELAYER_QUOTA ?? 100),
     signerLoaded: (venue) => !!addrs[venueChain[venue]],
-    // "0" blocks all withdraws until the user sets an explicit per-call ceiling.
-    withdrawMaxPerCall: () => process.env.STARLING_WITHDRAW_MAX ?? "0",
     limits: () => limits,
     dailyUsage: () => {
       rollUsage();
@@ -327,7 +325,7 @@ export async function startServer(): Promise<void> {
           fileFormat: { version: 1, byChain: { polygon: "0x… (40 hex, EVM)", solana: "… (base58, 32 bytes)" } },
           note:
             "The withdraw tool itself takes NO recipient argument — the destination is read from this file. " +
-            "Withdraws also need STARLING_WITHDRAW_MAX > 0. Verify the commitment against your wallet/recovery sheet, not chat.",
+            "Verify the commitment against your wallet/recovery sheet, not chat.",
         });
       }
       case "get_wallet_addresses":

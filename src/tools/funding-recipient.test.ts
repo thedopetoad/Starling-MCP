@@ -44,7 +44,6 @@ function depsWith(t: SealedTreasury): ToolDeps {
     executor: { async exec() { throw new Error("unused"); }, async execSequence() { return []; } },
     dailyRelayerQuota: 100,
     signerLoaded: () => true,
-    withdrawMaxPerCall: () => "0",
     limits: () => ({ perTradeMaxUsd: "0", dailyNotionalCapUsd: "0", dailyLossCapUsd: "0", killSwitch: false }),
     dailyUsage: () => ({ dayKey: "2026-06-18", openedNotionalUsd: "0", realizedLossUsd: "0" }),
     recordOpen: () => {},

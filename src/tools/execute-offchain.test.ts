@@ -3,7 +3,7 @@
 // (not just build), so a cold agent driving the tools completes the lifecycle:
 //   - close_position POSTs the signed close via adapter.submit (like open).
 //   - build_withdraw(chain="hyperliquid") EXECUTES the native HL withdraw via the
-//     adapter, enforces the per-call cap, and NEVER re-posts on a replayed key.
+//     adapter, and NEVER re-posts on a replayed key.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { handleMoneyTool, type ToolDeps } from "./index.js";
@@ -54,7 +54,7 @@ function makeHlAdapter(calls: Record<string, number>): VenueAdapter {
   };
 }
 
-function makeDeps(adapter: VenueAdapter, withdrawMax: string): ToolDeps {
+function makeDeps(adapter: VenueAdapter): ToolDeps {
   let opened = "0";
   return {
     botId: "test",
@@ -69,7 +69,6 @@ function makeDeps(adapter: VenueAdapter, withdrawMax: string): ToolDeps {
     executor: { async exec() { throw new Error("executor not used in this test"); }, async execSequence() { return []; } },
     dailyRelayerQuota: 100,
     signerLoaded: () => true,
-    withdrawMaxPerCall: () => withdrawMax,
     limits: (): RiskLimits => ({ perTradeMaxUsd: "0", dailyNotionalCapUsd: "0", dailyLossCapUsd: "0", killSwitch: false }),
     dailyUsage: (): DailyUsage => ({ dayKey: "2026-06-16", openedNotionalUsd: opened, realizedLossUsd: "0" }),
     recordOpen: (n) => {
@@ -85,7 +84,7 @@ const call = (deps: ToolDeps, name: string, args: Record<string, unknown>) =>
 
 test("close_position POSTs the signed close via adapter.submit (FILLED, not just built)", async () => {
   const calls: Record<string, number> = {};
-  const deps = makeDeps(makeHlAdapter(calls), "0");
+  const deps = makeDeps(makeHlAdapter(calls));
   const res = await call(deps, "close_position", {
     venue: "hyperliquid",
     marketId: "hl:SOL",
@@ -101,25 +100,16 @@ test("close_position POSTs the signed close via adapter.submit (FILLED, not just
 
 test("build_withdraw(hyperliquid) EXECUTES the native HL withdraw via the adapter", async () => {
   const calls: Record<string, number> = {};
-  const deps = makeDeps(makeHlAdapter(calls), "10");
+  const deps = makeDeps(makeHlAdapter(calls));
   const res = await call(deps, "build_withdraw", { chain: "hyperliquid", amount: "4", idempotencyKey: "w1" });
   assert.equal(res.ok, true);
   assert.equal(calls.withdraw, 1);
   assert.match(res.note, /your OWN address on Arbitrum/);
 });
 
-test("build_withdraw(hyperliquid) is BLOCKED by the per-call cap (STARLING_WITHDRAW_MAX=0)", async () => {
-  const calls: Record<string, number> = {};
-  const deps = makeDeps(makeHlAdapter(calls), "0");
-  const res = await call(deps, "build_withdraw", { chain: "hyperliquid", amount: "4", idempotencyKey: "w2" });
-  assert.equal(res.ok, false);
-  assert.equal(res.withdrawCode, "amount_exceeds_cap");
-  assert.equal(calls.withdraw ?? 0, 0, "withdraw NOT called when capped");
-});
-
 test("build_withdraw(hyperliquid) NEVER re-posts on a replayed idempotencyKey", async () => {
   const calls: Record<string, number> = {};
-  const deps = makeDeps(makeHlAdapter(calls), "10");
+  const deps = makeDeps(makeHlAdapter(calls));
   const first = await call(deps, "build_withdraw", { chain: "hyperliquid", amount: "4", idempotencyKey: "w3" });
   assert.equal(first.ok, true);
   const replay = await call(deps, "build_withdraw", { chain: "hyperliquid", amount: "4", idempotencyKey: "w3" });

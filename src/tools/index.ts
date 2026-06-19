@@ -69,7 +69,6 @@ import {
 import {
   canWithdraw,
   chainSource,
-  cmpDecimal,
   resolveWithdrawRecipient,
   type ResolvedWithdraw,
   type SealedTreasury,
@@ -217,8 +216,6 @@ export interface ToolDeps {
   dailyRelayerQuota: number;
   /** Which venues currently have a loaded local signer (gates money moves). */
   signerLoaded(venue: Venue): boolean;
-  /** Per-call withdraw ceiling, sourced from risk limits — NOT from the agent. */
-  withdrawMaxPerCall(chain: Chain): string;
   /** The USER-SET risk limits (per-trade/daily caps + kill-switch). Not agent-set. */
   limits(): RiskLimits;
   /** Today's accumulated usage for the daily caps (caller rolls it at UTC midnight). */
@@ -856,16 +853,10 @@ async function handleBuildWithdraw(deps: ToolDeps, a: Args): Promise<ToolText> {
   // Hyperliquid has a NATIVE off-ramp: a user-signed withdraw3 that HL releases
   // ONLY to the account owner's own address (recipient pinned by HL — not the
   // sealed treasury, not an argument). So it does NOT route through the
-  // treasury-sweep path below; we still enforce the per-call cap, then EXECUTE it
-  // via the adapter (it POSTs to /exchange like an order). $1 flat HL fee, ~5 min
-  // to land. Reserve the intent FIRST so a replayed key can never post twice.
+  // treasury-sweep path below; we EXECUTE it via the adapter (it POSTs to
+  // /exchange like an order). $1 flat HL fee, ~5 min to land. Reserve the intent
+  // FIRST so a replayed key can never post twice.
   if (chain === "hyperliquid") {
-    const cap = deps.withdrawMaxPerCall(chain);
-    if (cmpDecimal(amount, cap) > 0) {
-      return fail("treasury_refused", `Withdraw amount ${amount} exceeds the per-call cap ${cap}. Set STARLING_WITHDRAW_MAX.`, {
-        withdrawCode: "amount_exceeds_cap",
-      });
-    }
     const adapter = getAdapter(deps, "hyperliquid");
     if (!adapter.withdraw) return fail("internal", "hyperliquid adapter exposes no withdraw()");
 
@@ -898,14 +889,9 @@ async function handleBuildWithdraw(deps: ToolDeps, a: Args): Promise<ToolText> {
   let resolved: ResolvedWithdraw;
   try {
     const treasury = await deps.treasury();
-    // resolveWithdrawRecipient takes NO agent recipient — it reads the sealed
-    // treasury for the chain or throws. Amount is capped by risk limits, NOT
-    // by any agent input.
-    resolved = resolveWithdrawRecipient(treasury, {
-      chain,
-      amount,
-      maxPerCall: deps.withdrawMaxPerCall(chain),
-    });
+    // resolveWithdrawRecipient takes NO agent recipient — it reads the pinned
+    // treasury (keystore-sealed or dashboard-set) for the chain or throws.
+    resolved = resolveWithdrawRecipient(treasury, { chain, amount });
   } catch (e) {
     if (e instanceof WithdrawError) {
       return fail("treasury_refused", e.message, { withdrawCode: e.code });

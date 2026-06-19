@@ -111,7 +111,7 @@ const stages = {
   async "hl-withdraw"() {
     const amt = a[0] || "1";
     console.log(`build_withdraw(hyperliquid) ${amt} USDC -> own Arbitrum address`);
-    if (!LIVE) return console.log("DRY — re-run with --live. (Needs STARLING_WITHDRAW_MAX set.)");
+    if (!LIVE) return console.log("DRY — re-run with --live.");
     show(await call("build_withdraw", { chain: "hyperliquid", amount: amt, idempotencyKey: key("hlw") }));
   },
   async "hl-trade"() {

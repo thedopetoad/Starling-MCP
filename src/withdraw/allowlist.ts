@@ -107,7 +107,6 @@ export class WithdrawError extends Error {
       | "treasury_not_sealed"
       | "no_treasury_for_chain"
       | "recipient_not_allowed"
-      | "amount_exceeds_cap"
       | "treasury_conflict",
     message: string,
   ) {
@@ -118,10 +117,8 @@ export class WithdrawError extends Error {
 
 export interface WithdrawRequest {
   chain: Chain;
-  /** decimal string token amount; validated against the per-call cap. */
+  /** decimal string token amount the user asked to withdraw. */
   amount: string;
-  /** Per-call ceiling (decimal string). Set from risk limits, not the agent. */
-  maxPerCall: string;
 }
 
 export interface ResolvedWithdraw {
@@ -138,8 +135,8 @@ export interface ResolvedWithdraw {
  * single chokepoint build_withdraw uses.
  *
  * Throws WithdrawError on: a keystore/dashboard conflict, no destination
- * anywhere, no destination for the chain, or an amount over the per-call cap.
- * There is no code path that returns an agent-supplied address.
+ * anywhere, or no destination for the chain. There is no code path that returns
+ * an agent-supplied address.
  */
 export function resolveWithdrawRecipient(
   treasury: SealedTreasury,
@@ -174,12 +171,6 @@ export function resolveWithdrawRecipient(
     throw new WithdrawError(
       "no_treasury_for_chain",
       `No withdraw destination for chain "${req.chain}".`,
-    );
-  }
-  if (cmpDecimal(req.amount, req.maxPerCall) > 0) {
-    throw new WithdrawError(
-      "amount_exceeds_cap",
-      `Withdraw amount ${req.amount} exceeds per-call cap ${req.maxPerCall}.`,
     );
   }
   return { chain: req.chain, recipient, amount: req.amount };

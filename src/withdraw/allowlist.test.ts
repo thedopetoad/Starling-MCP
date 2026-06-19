@@ -42,11 +42,7 @@ const sealed: SealedTreasury = {
 // ── (A) recipient guardrail ───────────────────────────────────────────────
 
 test("resolveWithdrawRecipient returns ONLY the sealed treasury", () => {
-  const out = resolveWithdrawRecipient(sealed, {
-    chain: "polygon",
-    amount: "100",
-    maxPerCall: "1000",
-  });
+  const out = resolveWithdrawRecipient(sealed, { chain: "polygon", amount: "100" });
   assert.equal(out.recipient, TREASURY);
 });
 
@@ -75,26 +71,15 @@ test("the treasury equality check is checksum-agnostic on EVM but exact on Solan
 test("withdraw refused when no treasury is sealed", () => {
   const unsealed: SealedTreasury = { sealed: false, byChain: {} };
   assert.throws(
-    () => resolveWithdrawRecipient(unsealed, { chain: "polygon", amount: "1", maxPerCall: "1000" }),
+    () => resolveWithdrawRecipient(unsealed, { chain: "polygon", amount: "1" }),
     (e: unknown) => e instanceof WithdrawError && e.code === "treasury_not_sealed",
   );
 });
 
 test("withdraw refused when the chain has no sealed treasury", () => {
   assert.throws(
-    () => resolveWithdrawRecipient(sealed, { chain: "solana", amount: "1", maxPerCall: "1000" }),
+    () => resolveWithdrawRecipient(sealed, { chain: "solana", amount: "1" }),
     (e: unknown) => e instanceof WithdrawError && e.code === "no_treasury_for_chain",
-  );
-});
-
-test("withdraw refused when amount exceeds the per-call cap (decimal-safe)", () => {
-  assert.throws(
-    () => resolveWithdrawRecipient(sealed, { chain: "polygon", amount: "1000.01", maxPerCall: "1000" }),
-    (e: unknown) => e instanceof WithdrawError && e.code === "amount_exceeds_cap",
-  );
-  // boundary: exactly the cap is allowed
-  assert.doesNotThrow(() =>
-    resolveWithdrawRecipient(sealed, { chain: "polygon", amount: "1000.00", maxPerCall: "1000" }),
   );
 });
 
@@ -112,7 +97,7 @@ test("a dashboard-pinned destination is withdraw-eligible (sealed stays false)",
     byChain: { polygon: TREASURY },
     sourceByChain: { polygon: "dashboard" },
   };
-  const out = resolveWithdrawRecipient(pinned, { chain: "polygon", amount: "10", maxPerCall: "100" });
+  const out = resolveWithdrawRecipient(pinned, { chain: "polygon", amount: "10" });
   assert.equal(out.recipient, TREASURY);
 });
 
@@ -136,7 +121,7 @@ test("a keystore/dashboard conflict refuses the withdraw (fail-closed)", () => {
     sourceByChain: { polygon: "conflict" },
   };
   assert.throws(
-    () => resolveWithdrawRecipient(conflicted, { chain: "polygon", amount: "1", maxPerCall: "100" }),
+    () => resolveWithdrawRecipient(conflicted, { chain: "polygon", amount: "1" }),
     (e: unknown) => e instanceof WithdrawError && e.code === "treasury_conflict",
   );
   assert.throws(
