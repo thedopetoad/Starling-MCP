@@ -25,6 +25,7 @@ import { jupiterAdapter } from "./adapters/jupiter.js";
 import { makeRealVenueEnabler } from "./adapters/venue-enabler.js";
 import { DeBridgeBridge } from "./bridge/debridge.js";
 import { cctpBridge } from "./bridge/cctp.js";
+import type { NativeBalanceReader } from "./bridge/gas.js";
 import { makeExecutor } from "./exec/executor.js";
 import { EvmRpc } from "./adapters/evm-rpc.js";
 import { SolanaRpc } from "./adapters/solana-rpc.js";
@@ -178,6 +179,42 @@ export function buildToolDeps(): ToolDeps {
     bridges.cctp = cctpBridge;
   }
 
+  // Per-chain loaded-signer address (the pinned recipient / source). null = no key.
+  const sourceAddressFor = (chain: Chain): string | null => {
+    const a = chain === "solana" ? addrs.solana : chain === "hyperliquid" ? addrs.hyperliquid : addrs.polygon;
+    return a ?? null;
+  };
+  // Native-gas balance (decimal number) of the loaded signer on a chain. Reads the
+  // chain's RPC; returns 0 on any error (env unset / network).
+  const nativeGasReader = async (chain: Chain): Promise<number> => {
+    try {
+      if (chain === "solana") {
+        if (!addrs.solana) return 0;
+        return Number(await new SolanaRpc().getBalanceLamports(addrs.solana)) / 1e9;
+      }
+      const net: "polygon" | "arbitrum" = chain === "hyperliquid" ? "arbitrum" : "polygon";
+      const addr = chain === "hyperliquid" ? addrs.hyperliquid : addrs.polygon;
+      if (!addr) return 0;
+      return Number(await new EvmRpc({ net }).getBalanceWei(addr)) / 1e18;
+    } catch {
+      return 0;
+    }
+  };
+  // Decimal-string balance reader the gas planner / ensureGas consume. Reads the
+  // ACTUAL address passed (a top-up dest / funding recipient / source authority may
+  // differ from the loaded signer), so the gas-leg "already funded?" check is right.
+  const readNativeBalance: NativeBalanceReader = async (chain, address) => {
+    try {
+      if (chain === "solana") {
+        return String(Number(await new SolanaRpc().getBalanceLamports(address)) / 1e9);
+      }
+      const net: "polygon" | "arbitrum" = chain === "hyperliquid" ? "arbitrum" : "polygon";
+      return String(Number(await new EvmRpc({ net }).getBalanceWei(address)) / 1e18);
+    } catch {
+      return "0";
+    }
+  };
+
   return {
     botId: process.env.STARLING_BOT_ID ?? "default",
     adapters,
@@ -185,8 +222,8 @@ export function buildToolDeps(): ToolDeps {
     store: makeIntentStore(),
     reconciler: makeReconciler(),
     treasury: loadSealedTreasury,
-    gas: makeGasPlanner(),
-    funding: makeFundingPlanner(),
+    gas: makeGasPlanner({ readNativeBalance, sourceAddressFor }),
+    funding: makeFundingPlanner({ readNativeBalance, sourceAddressFor }),
     enabler: makeRealVenueEnabler(),
     // Signs + broadcasts + confirms the on-chain legs locally (same broadcasters
     // the harness uses). The on-chain tools call this to EXECUTE, not just build.
@@ -203,25 +240,9 @@ export function buildToolDeps(): ToolDeps {
       usage = { ...usage, openedNotionalUsd: addDecimal(usage.openedNotionalUsd, n) };
     },
     // The loaded signer's OWN address per chain — the pinned `transfer` recipient.
-    selfAddress: (chain: Chain) => {
-      const a = chain === "solana" ? addrs.solana : chain === "hyperliquid" ? addrs.hyperliquid : addrs.polygon;
-      return a ?? null;
-    },
+    selfAddress: (chain: Chain) => sourceAddressFor(chain),
     // Destination native-gas balance (decimal units) for the transfer rail decision.
-    nativeGas: async (chain: Chain) => {
-      try {
-        if (chain === "solana") {
-          if (!addrs.solana) return 0;
-          return Number(await new SolanaRpc().getBalanceLamports(addrs.solana)) / 1e9;
-        }
-        const net: "polygon" | "arbitrum" = chain === "hyperliquid" ? "arbitrum" : "polygon";
-        const addr = chain === "hyperliquid" ? addrs.hyperliquid : addrs.polygon;
-        if (!addr) return 0;
-        return Number(await new EvmRpc({ net }).getBalanceWei(addr)) / 1e18;
-      } catch {
-        return 0;
-      }
-    },
+    nativeGas: nativeGasReader,
   };
 }
 

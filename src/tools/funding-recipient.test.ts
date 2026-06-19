@@ -38,8 +38,19 @@ function depsWith(t: SealedTreasury): ToolDeps {
     store: makeIntentStore(),
     reconciler: makeReconciler(),
     treasury: async () => t,
-    gas: makeGasPlanner(),
-    funding: makeFundingPlanner(),
+    gas: makeGasPlanner({ readNativeBalance: async () => "0", sourceAddressFor: () => null }),
+    funding: makeFundingPlanner({
+      readNativeBalance: async () => "0",
+      sourceAddressFor: () => null, // gas leg skips gracefully; this test only checks the gate
+      cctp: {
+        async quote() {
+          return { provider: "cctp", feeUsd: "0", etaSec: 60, starlingFeeUsd: "0", reorgExposed: false };
+        },
+        async buildBridgeIn() {
+          return [];
+        },
+      },
+    }),
     enabler: makeRealVenueEnabler(),
     executor: { async exec() { throw new Error("unused"); }, async execSequence() { return []; } },
     dailyRelayerQuota: 100,
