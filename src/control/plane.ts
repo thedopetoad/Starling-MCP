@@ -59,7 +59,9 @@ async function clearHalt(): Promise<void> {
 // positions, cancel orders, and withdraw to the pinned treasury while halted.
 // Allowed while halted: all reads, close_position, *_cancel/_exit/_claim,
 // *_withdraw, build_withdraw, pm_withdraw, hl_bridge_out, transfer, advance_bridge,
-// ensure_gas, enable_venue, hl margin/leverage/vault/usd-class moves, stake/delegate.
+// ensure_gas, enable_venue, hl margin/leverage/usd-class moves, delegate, and the
+// WITHDRAW side of vault/stake. ALSO blocked (beyond this set): the DEPOSIT side of
+// hl_vault_transfer / hl_stake — see HALT_BLOCKED_ON_DEPOSIT below (they lock funds).
 export const HALT_BLOCKED_TOOLS: ReadonlySet<string> = new Set<string>([
   "open_position",
   "hl_order",
@@ -71,9 +73,27 @@ export const HALT_BLOCKED_TOOLS: ReadonlySet<string> = new Set<string>([
   "jup_lend_borrow",
 ]);
 
-/** True if `tool` should be refused right now because trading is halted. */
-export function isHaltBlocked(tool: string): boolean {
-  return haltActive() && HALT_BLOCKED_TOOLS.has(tool);
+// Capital-deploying tools whose DEPOSIT direction LOCKS funds for days (HLP ~4-day
+// lockup; staking ~7-day unbond), so a halt must block the deposit side too — else a
+// rogue/buggy agent could lock funds during the very halt meant to get you flat. The
+// WITHDRAW/unstake side stays ALLOWED (you must always be able to exit). These tools
+// carry a direction arg, so the check is arg-aware (name-only halting can't tell which).
+const HALT_BLOCKED_ON_DEPOSIT: ReadonlyArray<{ tool: string; isDeposit: (a: Record<string, unknown>) => boolean }> = [
+  { tool: "hl_vault_transfer", isDeposit: (a) => a.isDeposit === true },
+  { tool: "hl_stake", isDeposit: (a) => a.direction === "deposit" },
+];
+
+/** PURE classification (no I/O): would a halt block this tool + args? Exported for tests. */
+export function haltBlocks(tool: string, args?: Record<string, unknown>): boolean {
+  if (HALT_BLOCKED_TOOLS.has(tool)) return true;
+  const dep = HALT_BLOCKED_ON_DEPOSIT.find((d) => d.tool === tool);
+  return dep ? dep.isDeposit(args ?? {}) : false;
+}
+
+/** True if `tool` should be refused right now because trading is halted. Arg-aware:
+ *  blocks trade entry + the DEPOSIT side of vault/stake; allows the withdraw/exit side. */
+export function isHaltBlocked(tool: string, args?: Record<string, unknown>): boolean {
+  return haltActive() && haltBlocks(tool, args);
 }
 
 // ── status heartbeat (here -> dashboard) ──────────────────────────────────────

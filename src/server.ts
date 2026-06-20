@@ -300,7 +300,7 @@ export async function startServer(): Promise<void> {
       // trade-ENTRY tools (open/increase exposure). Closes, cancels, withdraws,
       // bridges-home and reads still pass — so the user can still get flat / get
       // funds out while halted. See control/plane.ts HALT_BLOCKED_TOOLS.
-      if (isHaltBlocked(name)) {
+      if (isHaltBlocked(name, req.params.arguments as Record<string, unknown> | undefined)) {
         log(`halted: refused ${name} (trading.halt present)`);
         return {
           content: [{
