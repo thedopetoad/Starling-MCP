@@ -7,8 +7,10 @@
 // serialization in evm-broadcast.ts, never its network layer.
 
 /** The real EVM networks this stack touches. Note the repo Chain "hyperliquid"
- *  maps here to "arbitrum" (HL deposit/withdraw funds physically live on Arbitrum). */
-export type EvmNet = "polygon" | "arbitrum" | "ethereum";
+ *  maps here to "arbitrum" (HL deposit/withdraw funds physically live on Arbitrum).
+ *  "hyperevm" is HL's own EVM layer (chainId 999) — distinct from Arbitrum; reached
+ *  for the cheap CCTP exit (HyperCore->HyperEVM->CCTP). Native gas = HYPE. */
+export type EvmNet = "polygon" | "arbitrum" | "ethereum" | "hyperevm";
 
 /** repo Chain (EVM ones) -> the real network its tx executes on. */
 export const EVM_CHAIN_NET: Record<"polygon" | "hyperliquid", EvmNet> = {
@@ -20,6 +22,7 @@ export const EVM_CHAIN_IDS: Record<EvmNet, number> = {
   ethereum: 1,
   polygon: 137,
   arbitrum: 42161,
+  hyperevm: 999,
 };
 
 // Public fallbacks — fine for a tiny self-test; set STARLING_RPC_<NET> for volume.
@@ -31,6 +34,7 @@ const PUBLIC_RPC: Record<EvmNet, string> = {
   ethereum: "https://ethereum-rpc.publicnode.com",
   polygon: "https://polygon-bor-rpc.publicnode.com",
   arbitrum: "https://arb1.arbitrum.io/rpc",
+  hyperevm: "https://rpc.hyperliquid.xyz/evm",
 };
 
 function envRpc(net: EvmNet): string | undefined {

@@ -368,6 +368,116 @@ async function hlToEvm() {
   console.log("  linked 0x6b9e7731… (spotMeta) vs Circle-native 0xb88339CB… (CCTP-burnable)");
 }
 
+// ── HYPE-gas bootstrap: buy HYPE on HL spot + spotSend it to HyperEVM as native
+// gas, so the HyperEVM address can pay for a CCTP burn (the cheap-exit second hop).
+// usdClassTransfer perp<->spot. usage: hl-usd-class <amt> [toperp]
+async function hlUsdClass() {
+  const amt = arg || "4";
+  const toPerp = (arg2 || "").toLowerCase() === "toperp";
+  const { signUsdClassTransfer } = await import("../dist/adapters/hl-signing.js");
+  const { postExchange, HL_MAINNET } = await import("../dist/adapters/hl-transport.js");
+  const signer = getEvmSigner("hyperliquid");
+  console.log(`usdClassTransfer ${amt} USDC ${toPerp ? "spot->perp" : "perp->spot"}`);
+  if (!LIVE) return void console.log("DRY — --live.");
+  const u = signUsdClassTransfer({ signer, amount: amt, toPerp, nonce: Date.now(), isMainnet: true });
+  const r = await postExchange({ action: u.action, nonce: u.nonce, signature: u.signature, vaultAddress: null }, { host: HL_MAINNET });
+  console.log("  result:", JSON.stringify({ posted: r.posted, status: r.status, error: r.error, raw: r.raw }));
+}
+
+// Spot IOC buy of HYPE (asset 10107 = HYPE/USDC pair @107). usage: hl-buy-hype <hypeSize>
+async function hlBuyHype() {
+  const size = arg || "0.05";
+  const { signL1Action } = await import("../dist/adapters/hl-signing.js");
+  const { postExchange, HL_MAINNET, infoPost } = await import("../dist/adapters/hl-transport.js");
+  const { floatToWire, roundPx } = await import("../dist/adapters/hyperliquid.js");
+  const signer = getEvmSigner("hyperliquid");
+  const mids = await infoPost({ type: "allMids" }, { host: HL_MAINNET });
+  const mid = Number(mids["@107"]);
+  const limit = roundPx(mid * 1.03, 2); // generous IOC buy limit (HYPE szDecimals 2)
+  const order = { a: 10107, b: true, p: floatToWire(limit), s: floatToWire(Number(size)), r: false, t: { limit: { tif: "Ioc" } } };
+  const action = { type: "order", orders: [order], grouping: "na" };
+  const nonce = Date.now();
+  const signature = signL1Action({ signer, action, nonce, vaultAddress: null, isMainnet: true });
+  console.log(`spot BUY ${size} HYPE @ limit ${limit} (mid ${mid}) — spend ~$${(Number(size) * mid).toFixed(2)}`);
+  if (!LIVE) return void console.log("DRY — --live.");
+  const r = await postExchange({ action, nonce, signature, vaultAddress: null }, { host: HL_MAINNET });
+  console.log("  result:", JSON.stringify({ posted: r.posted, status: r.status, error: r.error, raw: r.raw }));
+}
+
+// spotSend HYPE -> HyperEVM as NATIVE gas (HYPE's special system addr 0x2222...2222,
+// NOT the 0x20+index formula — HYPE is the gas token). usage: hl-hype-to-evm <amt>
+async function hlHypeToEvm() {
+  const amt = arg || "0.04";
+  const { signSpotSend } = await import("../dist/adapters/hl-signing.js");
+  const { postExchange, HL_MAINNET } = await import("../dist/adapters/hl-transport.js");
+  const signer = getEvmSigner("hyperliquid");
+  const HYPE_TOKEN = "HYPE:0x0d01dc56dcaaca66ad901c959b4011ec"; // name:tokenId from spotMeta (index 150)
+  const HYPE_SYS = "0x2222222222222222222222222222222222222222";
+  console.log(`spotSend ${amt} HYPE -> HyperEVM native gas via ${HYPE_SYS}`);
+  if (!LIVE) return void console.log("DRY — --live.");
+  const s = signSpotSend({ signer, destination: HYPE_SYS, token: HYPE_TOKEN, amount: amt, time: Date.now(), isMainnet: true });
+  const r = await postExchange({ action: s.action, nonce: s.nonce, signature: s.signature, vaultAddress: null }, { host: HL_MAINNET });
+  console.log("  result:", JSON.stringify({ posted: r.posted, status: r.status, error: r.error, raw: r.raw }));
+}
+
+// ── HyperEVM -> Arbitrum CCTP burn (the cheap-exit SECOND hop; pays HYPE gas) ──
+// approve + depositForBurn on HyperEVM (CCTP domain 19) -> Iris attestation ->
+// receiveMessage on Arbitrum (domain 3). Inline like the `cctp` stage (HyperEVM
+// isn't in cctp.ts's repo-Chain machinery yet). usage: hl-evm-cctp-out <amt> [--live]
+async function hlEvmCctpOut() {
+  const amt = arg || "2";
+  const amountBase = BigInt(Math.round(Number(amt) * 1e6));
+  const signer = getEvmSigner("hyperliquid"); // same key on HyperEVM + Arbitrum
+  const heRpc = new EvmRpc({ net: "hyperevm" });
+  const arbRpc = new EvmRpc({ net: "arbitrum" });
+  const TMv2 = "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d";
+  const MTv2 = "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64";
+  const USDC_HE = "0xb88339CB7199b77E23DB6E890353E22632Ba630f";
+  const USDC_ARB = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831";
+  const Z32 = "0x" + "00".repeat(32);
+  const recipient32 = "0x000000000000000000000000" + signer.address.slice(2).toLowerCase();
+  const DFB_ABI = [{ name: "depositForBurn", type: "function", stateMutability: "nonpayable", inputs: [{ name: "amount", type: "uint256" }, { name: "destinationDomain", type: "uint32" }, { name: "mintRecipient", type: "bytes32" }, { name: "burnToken", type: "address" }, { name: "destinationCaller", type: "bytes32" }, { name: "maxFee", type: "uint256" }, { name: "minFinalityThreshold", type: "uint32" }], outputs: [] }];
+  const RECV_ABI = [{ name: "receiveMessage", type: "function", stateMutability: "nonpayable", inputs: [{ name: "message", type: "bytes" }, { name: "attestation", type: "bytes" }], outputs: [{ type: "bool" }] }];
+  const appr = (spender, a) => "0x095ea7b3" + spender.slice(2).toLowerCase().padStart(64, "0") + a.toString(16).padStart(64, "0");
+  const bal = async (rpc, tok, who) => BigInt(await rpc.callReadonly({ from: who, to: tok, data: "0x70a08231" + who.slice(2).toLowerCase().padStart(64, "0") }));
+
+  const heUsdc = await bal(heRpc, USDC_HE, signer.address);
+  const heHype = await heRpc.getBalanceWei(signer.address);
+  console.log(`HyperEVM USDC ${fmt(heUsdc, 6)} | HYPE ${(Number(heHype) / 1e18).toFixed(4)} | burn ${amt} -> Arbitrum ${signer.address}`);
+  if (heUsdc < amountBase) return void console.log("  insufficient HyperEVM USDC.");
+  if (!LIVE) return void console.log("DRY — --live to burn.");
+
+  console.log("\n>>> approve USDC->TokenMessenger (HyperEVM) <<<");
+  let r = await signAndSendEvm({ to: USDC_HE, data: appr(TMv2, amountBase), value: 0n }, signer, heRpc);
+  console.log("   ", { ok: r.ok, status: r.status, txHash: r.txHash }); if (!r.ok) return void console.log("  STOP: approve failed.");
+  console.log("\n>>> depositForBurn (HyperEVM 19 -> Arbitrum 3, standard lane) <<<");
+  const dfb = encodeFunctionData({ abi: DFB_ABI, functionName: "depositForBurn", args: [amountBase, 3, recipient32, USDC_HE, Z32, 0n, 2000] });
+  r = await signAndSendEvm({ to: TMv2, data: dfb, value: 0n }, signer, heRpc);
+  console.log("   ", { ok: r.ok, status: r.status, txHash: r.txHash }); if (!r.ok) return void console.log("  STOP: depositForBurn failed.");
+  const burnHash = r.txHash;
+  console.log("    burn:", burnHash);
+
+  console.log("\n  polling Iris attestation (source domain 19)…");
+  let msg, att;
+  const deadline = Date.now() + 900_000;
+  for (;;) {
+    await sleep(12000);
+    const j = await fetch(`https://iris-api.circle.com/v2/messages/19?transactionHash=${burnHash}`).then((x) => x.json()).catch((e) => ({ err: e.message }));
+    const m = j?.messages?.[0];
+    console.log(`  [${new Date().toISOString().slice(11, 19)}] iris=${m?.status ?? (j.err ? "err:" + j.err : "indexing")}`);
+    if (m?.status === "complete" && m.attestation && m.attestation !== "PENDING" && m.message && m.message !== "0x") { msg = m.message; att = m.attestation; break; }
+    if (Date.now() > deadline) return void console.log("  Iris timeout; re-poll later (burn hash above).");
+  }
+
+  const arbBefore = await bal(arbRpc, USDC_ARB, signer.address);
+  console.log("\n>>> receiveMessage (Arbitrum) — mint (pays Arbitrum ETH) <<<");
+  r = await signAndSendEvm({ to: MTv2, data: encodeFunctionData({ abi: RECV_ABI, functionName: "receiveMessage", args: [msg, att] }), value: 0n }, signer, arbRpc);
+  console.log("   ", { ok: r.ok, status: r.status, txHash: r.txHash });
+  if (r.txHash) console.log("    https://arbiscan.io/tx/" + r.txHash);
+  const arbAfter = await bal(arbRpc, USDC_ARB, signer.address);
+  console.log(`\n  ✓ Arbitrum USDC ${fmt(arbBefore, 6)} -> ${fmt(arbAfter, 6)} (+${fmt(arbAfter - arbBefore, 6)}) — HyperEVM->Arbitrum CCTP, gas paid in HYPE.`);
+}
+
 // ── Polymarket L2 CLOB cred derivation (createOrDeriveApiKey) ────────────────
 // L1 ClobAuth EIP-712 (domain ClobAuthDomain v1 chainId 137, no verifyingContract)
 // signed by the EOA -> L1 headers -> POST /auth/api-key (create) else GET
@@ -712,6 +822,6 @@ async function pmBridgeWithdraw() {
   }
 }
 
-const stages = { balances, swap, jup, bridge, "hl-deposit": hlDeposit, "hl-trade": hlTrade, "hl-close": hlClose, "hl-withdraw": hlWithdraw, "hl-to-evm": hlToEvm, "pm-creds": pmCreds, "pm-enable": pmEnable, "enable-dw": enableDw, "poly-swap": polySwap, "pm-trade": pmTrade, "pm-bridge-withdraw": pmBridgeWithdraw, route, cctp, transfer };
+const stages = { balances, swap, jup, bridge, "hl-deposit": hlDeposit, "hl-trade": hlTrade, "hl-close": hlClose, "hl-withdraw": hlWithdraw, "hl-to-evm": hlToEvm, "hl-usd-class": hlUsdClass, "hl-buy-hype": hlBuyHype, "hl-hype-to-evm": hlHypeToEvm, "hl-evm-cctp-out": hlEvmCctpOut, "pm-creds": pmCreds, "pm-enable": pmEnable, "enable-dw": enableDw, "poly-swap": polySwap, "pm-trade": pmTrade, "pm-bridge-withdraw": pmBridgeWithdraw, route, cctp, transfer };
 if (!stages[stage]) { console.log("stages:", Object.keys(stages).join(", ")); process.exit(1); }
 await stages[stage]();
