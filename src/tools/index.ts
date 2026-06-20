@@ -314,6 +314,12 @@ export interface JupRecurringArgs {
   startAt?: number; // unix seconds; omit for immediate
 }
 export interface JupRecurringCancelArgs { order: string }
+/** Jupiter Lend EARN: deposit/withdraw a decimal UI `amount` of `asset` (any SPL mint). */
+export interface JupLendEarnArgs { asset: string; amount: string }
+/** Jupiter Lend BORROW (advanced): one `operate` call. colAmount/debtAmount are SIGNED
+ *  RAW-unit strings (+col supply / -col withdraw; +debt borrow / -debt repay).
+ *  positionId 0 opens a new position. */
+export interface JupLendBorrowArgs { vaultId: number; positionId: number; colAmount: string; debtAmount: string }
 
 /**
  * The Jupiter advanced surface as an injectable ops object (mirrors HlVenueOps). Each
@@ -328,6 +334,13 @@ export interface JupVenueOps {
   recurringCreate(a: JupRecurringArgs): Promise<SubmitResult>;
   recurringCancel(a: JupRecurringCancelArgs): Promise<SubmitResult>;
   recurringList(status: "active" | "history"): Promise<unknown>;
+  lendDeposit(a: JupLendEarnArgs): Promise<SubmitResult>;
+  lendWithdraw(a: JupLendEarnArgs): Promise<SubmitResult>;
+  lendTokens(): Promise<unknown>;
+  lendPositions(): Promise<unknown>;
+  lendBorrow(a: JupLendBorrowArgs): Promise<SubmitResult>;
+  lendVaults(): Promise<unknown>;
+  lendBorrowPositions(): Promise<unknown>;
 }
 
 /**
@@ -939,6 +952,63 @@ export const MONEY_TOOLS = [
       type: "object" as const,
       properties: { status: { type: "string" as const, enum: ["active", "history"], description: "Default active." } },
     },
+  },
+  {
+    name: "jup_lend_deposit",
+    description:
+      "Deposit into Jupiter Lend EARN to earn yield. amount is a decimal UI amount of `asset` (SPL mint). " +
+      "Funds stay yours (withdraw anytime). Signs locally + broadcasts. Idempotent.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        asset: { ...STR, description: "Asset mint to deposit (e.g. USDC mint)." },
+        amount: { ...STR, description: "Decimal UI amount." },
+        ...IDEMPOTENCY,
+      },
+      required: ["asset", "amount", "idempotencyKey"],
+    },
+  },
+  {
+    name: "jup_lend_withdraw",
+    description: "Withdraw from Jupiter Lend EARN. amount is a decimal UI amount of `asset`. Idempotent.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        asset: STR,
+        amount: { ...STR, description: "Decimal UI amount." },
+        ...IDEMPOTENCY,
+      },
+      required: ["asset", "amount", "idempotencyKey"],
+    },
+  },
+  {
+    name: "jup_lend_borrow",
+    description:
+      "ADVANCED: Jupiter Lend BORROW one-shot `operate`. colAmount/debtAmount are SIGNED RAW-unit strings " +
+      "(+col supply collateral / -col withdraw; +debt borrow / -debt repay). positionId 0 opens a new " +
+      "position. Read jup_lend_markets first for vaultId + token decimals. Creates DEBT — manage liquidation " +
+      "risk. Idempotent.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        vaultId: { ...NUM, description: "The borrow vault id (from jup_lend_markets)." },
+        positionId: { ...NUM, description: "Borrow position id; 0 = open a new one (default)." },
+        colAmount: { ...STR, description: "Signed RAW collateral units (+supply / -withdraw). '0' for none." },
+        debtAmount: { ...STR, description: "Signed RAW debt units (+borrow / -repay). '0' for none." },
+        ...IDEMPOTENCY,
+      },
+      required: ["vaultId", "colAmount", "debtAmount", "idempotencyKey"],
+    },
+  },
+  {
+    name: "jup_lend_markets",
+    description: "Read-only: Jupiter Lend markets — EARN tokens (with APY) + BORROW vaults (with rates/LTV). No idempotency key.",
+    inputSchema: { type: "object" as const, properties: {} },
+  },
+  {
+    name: "jup_lend_positions",
+    description: "Read-only: a user's Jupiter Lend positions — EARN balances + BORROW positions. No idempotency key.",
+    inputSchema: { type: "object" as const, properties: {} },
   },
 ];
 
@@ -1948,6 +2018,42 @@ async function handleJupRecurringList(deps: ToolDeps, a: Args): Promise<ToolText
   return ok({ ok: true, status, orders: await v.recurringList(status) });
 }
 
+async function handleJupLendDeposit(deps: ToolDeps, a: Args): Promise<ToolText> {
+  const args = { asset: reqStr(a, "asset"), amount: reqStr(a, "amount") };
+  return runJupVenue(deps, reqStr(a, "idempotencyKey"), "open", "jup_lend_deposit", (v) => v.lendDeposit(args));
+}
+
+async function handleJupLendWithdraw(deps: ToolDeps, a: Args): Promise<ToolText> {
+  const args = { asset: reqStr(a, "asset"), amount: reqStr(a, "amount") };
+  return runJupVenue(deps, reqStr(a, "idempotencyKey"), "open", "jup_lend_withdraw", (v) => v.lendWithdraw(args));
+}
+
+async function handleJupLendBorrow(deps: ToolDeps, a: Args): Promise<ToolText> {
+  const args = {
+    vaultId: reqNum(a, "vaultId"),
+    positionId: optNum(a, "positionId") ?? 0,
+    colAmount: reqStr(a, "colAmount"),
+    debtAmount: reqStr(a, "debtAmount"),
+  };
+  return runJupVenue(deps, reqStr(a, "idempotencyKey"), "open", "jup_lend_borrow", (v) => v.lendBorrow(args));
+}
+
+async function handleJupLendMarkets(deps: ToolDeps): Promise<ToolText> {
+  if (!deps.signerLoaded("jupiter")) return fail("signer_missing", "no solana signer loaded for jupiter; see auth_check");
+  const v = deps.jupVenue;
+  if (!v) return fail("internal", "the Jupiter venue surface is not wired this run (no solana signer at boot).");
+  const [earn, borrow] = await Promise.all([v.lendTokens(), v.lendVaults()]);
+  return ok({ ok: true, earn, borrow });
+}
+
+async function handleJupLendPositions(deps: ToolDeps): Promise<ToolText> {
+  if (!deps.signerLoaded("jupiter")) return fail("signer_missing", "no solana signer loaded for jupiter; see auth_check");
+  const v = deps.jupVenue;
+  if (!v) return fail("internal", "the Jupiter venue surface is not wired this run (no solana signer at boot).");
+  const [earn, borrow] = await Promise.all([v.lendPositions(), v.lendBorrowPositions()]);
+  return ok({ ok: true, earn, borrow });
+}
+
 // ── retry gate (exposed for the confirm/retry wiring) ────────────────────────
 // Not a tool itself, but the canonical place the retry decision is made so the
 // quota + per-intent caps live next to the builds. server.ts's retry_intent (a
@@ -2059,6 +2165,16 @@ export async function handleMoneyTool(name: string, rawArgs: unknown, deps: Tool
         return await handleJupRecurringCancel(deps, a);
       case "jup_recurring_list":
         return await handleJupRecurringList(deps, a);
+      case "jup_lend_deposit":
+        return await handleJupLendDeposit(deps, a);
+      case "jup_lend_withdraw":
+        return await handleJupLendWithdraw(deps, a);
+      case "jup_lend_borrow":
+        return await handleJupLendBorrow(deps, a);
+      case "jup_lend_markets":
+        return await handleJupLendMarkets(deps);
+      case "jup_lend_positions":
+        return await handleJupLendPositions(deps);
       default:
         return fail("unknown_tool", `unknown tool ${name}`);
     }

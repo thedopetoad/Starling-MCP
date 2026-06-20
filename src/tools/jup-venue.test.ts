@@ -25,6 +25,13 @@ function recordingJup() {
     async recurringCreate(a) { calls.push(["recurringCreate", a]); return { posted: true, status: "filled", orderId: "REC1", txHashes: ["sig3"] }; },
     async recurringCancel(a) { calls.push(["recurringCancel", a]); return { posted: true, status: "filled", txHashes: ["sig4"] }; },
     async recurringList(s) { calls.push(["recurringList", s]); return { orders: [], status: s }; },
+    async lendDeposit(a) { calls.push(["lendDeposit", a]); return { posted: true, status: "filled", txHashes: ["sigd"] }; },
+    async lendWithdraw(a) { calls.push(["lendWithdraw", a]); return { posted: true, status: "filled", txHashes: ["sigw"] }; },
+    async lendTokens() { calls.push(["lendTokens", null]); return { tokens: [] }; },
+    async lendPositions() { calls.push(["lendPositions", null]); return { positions: [] }; },
+    async lendBorrow(a) { calls.push(["lendBorrow", a]); return { posted: true, status: "filled", orderId: "9029", txHashes: ["sigb"] }; },
+    async lendVaults() { calls.push(["lendVaults", null]); return { vaults: [] }; },
+    async lendBorrowPositions() { calls.push(["lendBorrowPositions", null]); return { positions: [] }; },
   };
   return { ops, calls };
 }
@@ -97,4 +104,24 @@ test("jup_limit_list / jup_recurring_list: read-only, default active, not-wired 
   assert.equal(rl.status, "history");
   assert.deepEqual(calls.map((c) => c[0]), ["limitList", "recurringList"]);
   assert.equal((await parse(handleMoneyTool("jup_limit_list", {}, depsWith(undefined)))).ok, false);
+});
+
+test("jup_lend deposit/borrow execute + idempotent; markets/positions read both sides", async () => {
+  const { ops, calls } = recordingJup();
+  const deps = depsWith(ops);
+  const dep = await parse(handleMoneyTool("jup_lend_deposit", { idempotencyKey: "d1", asset: USDC, amount: "10" }, deps));
+  assert.equal(dep.ok, true);
+  assert.deepEqual(calls[0], ["lendDeposit", { asset: USDC, amount: "10" }]);
+  // borrow defaults positionId -> 0
+  await parse(handleMoneyTool("jup_lend_borrow", { idempotencyKey: "b1", vaultId: 3, colAmount: "1000000", debtAmount: "500000" }, deps));
+  assert.deepEqual(calls[1], ["lendBorrow", { vaultId: 3, positionId: 0, colAmount: "1000000", debtAmount: "500000" }]);
+  // idempotent replay
+  const replay = await parse(handleMoneyTool("jup_lend_deposit", { idempotencyKey: "d1", asset: USDC, amount: "10" }, deps));
+  assert.equal(replay.replayed, true);
+  // reads fan out to both sides
+  const mk = await parse(handleMoneyTool("jup_lend_markets", {}, deps));
+  assert.equal(mk.ok, true);
+  const pos = await parse(handleMoneyTool("jup_lend_positions", {}, deps));
+  assert.equal(pos.ok, true);
+  assert.deepEqual(calls.slice(2).map((c) => c[0]), ["lendTokens", "lendVaults", "lendPositions", "lendBorrowPositions"]);
 });

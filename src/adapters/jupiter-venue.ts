@@ -15,10 +15,14 @@ import type {
   JupLimitCancelArgs,
   JupRecurringArgs,
   JupRecurringCancelArgs,
+  JupLendEarnArgs,
+  JupLendBorrowArgs,
 } from "../tools/index.js";
 import { getSolanaSigner } from "../signers/index.js";
 import { JupiterAdapter, toBaseUnits } from "./jupiter.js";
-import { jupGet, jupPost, signAndExecute } from "./jupiter-rest.js";
+import { jupGet, jupPost, signAndExecute, signAndBroadcast } from "./jupiter-rest.js";
+
+const rejected = (error: string): SubmitResult => ({ posted: false, status: "rejected", error });
 
 class JupVenue implements JupVenueOps {
   private readonly jup = new JupiterAdapter(); // decimals resolution for any mint
@@ -102,6 +106,60 @@ class JupVenue implements JupVenueOps {
 
   async recurringList(status: "active" | "history"): Promise<unknown> {
     return jupGet("/recurring/v1/getRecurringOrders", { user: this.user(), orderStatus: status, recurringType: "time" });
+  }
+
+  // ── Lend: Earn (deposit/withdraw yield) ──────────────────────────────────────
+  // amount is a decimal UI amount of `asset`; converted to raw units via the mint's
+  // decimals. Returns an unsigned tx we broadcast ourselves (Lend has no /execute).
+
+  async lendDeposit(a: JupLendEarnArgs): Promise<SubmitResult> {
+    const meta = await this.jup.resolveTokenMeta(a.asset);
+    const r = await jupPost<{ transaction?: string; error?: string }>("/lend/v1/earn/deposit", { asset: a.asset, amount: toBaseUnits(a.amount, meta.decimals), signer: this.user() });
+    if (!r.transaction) return rejected(r.error ?? "lend deposit returned no transaction");
+    return signAndBroadcast({ unsignedTxB64: r.transaction });
+  }
+
+  async lendWithdraw(a: JupLendEarnArgs): Promise<SubmitResult> {
+    const meta = await this.jup.resolveTokenMeta(a.asset);
+    const r = await jupPost<{ transaction?: string; error?: string }>("/lend/v1/earn/withdraw", { asset: a.asset, amount: toBaseUnits(a.amount, meta.decimals), signer: this.user() });
+    if (!r.transaction) return rejected(r.error ?? "lend withdraw returned no transaction");
+    return signAndBroadcast({ unsignedTxB64: r.transaction });
+  }
+
+  async lendTokens(): Promise<unknown> {
+    return jupGet("/lend/v1/earn/tokens", {});
+  }
+
+  async lendPositions(): Promise<unknown> {
+    return jupGet("/lend/v1/earn/positions", { users: this.user() });
+  }
+
+  // ── Lend: Borrow (collateralized; advanced) ──────────────────────────────────
+  // ONE unified `operate` endpoint: colAmount/debtAmount are SIGNED RAW-unit strings —
+  // +col supplies collateral / -col withdraws it; +debt borrows / -debt repays.
+  // positionId 0 opens a new position (an NFT). Raw units (no UI conversion) because
+  // the two tokens differ per vault; read decimals from lendVaults() first.
+
+  async lendBorrow(a: JupLendBorrowArgs): Promise<SubmitResult> {
+    const r = await jupPost<{ transaction?: string; nftId?: number; error?: string }>("/lend/v1/borrow/operate", {
+      vaultId: a.vaultId,
+      positionId: a.positionId,
+      signer: this.user(),
+      colAmount: a.colAmount,
+      debtAmount: a.debtAmount,
+    });
+    if (!r.transaction) return rejected(r.error ?? "lend borrow/operate returned no transaction");
+    const res = await signAndBroadcast({ unsignedTxB64: r.transaction });
+    if (res.posted && r.nftId != null) res.orderId = String(r.nftId); // the borrow position NFT id
+    return res;
+  }
+
+  async lendVaults(): Promise<unknown> {
+    return jupGet("/lend/v1/borrow/vaults", {});
+  }
+
+  async lendBorrowPositions(): Promise<unknown> {
+    return jupGet("/lend/v1/borrow/positions", { users: this.user() });
   }
 }
 
