@@ -218,6 +218,24 @@ export interface PmBridgeOps {
   withdraw(args: { amount: string; toChain: Chain; recipient: string }): Promise<PmWithdrawResult>;
 }
 
+export interface HlBridgeOutResult {
+  ok: boolean;
+  txHashes: string[];
+  burnTxHash?: string;
+  blockers: string[];
+  note: string;
+}
+
+/**
+ * The CHEAP Hyperliquid exit (HyperCore -> HyperEVM -> CCTP -> dest): ~$0.003 + ~30s
+ * to ANY CCTP chain, vs the $1 / ~5-min / Arbitrum-only native withdraw3. EXECUTES
+ * the whole flow (HL actions + the EVM burn/mint) and self-funds HYPE gas. The
+ * recipient is pinned by the tool layer (sealed treasury), never chosen here.
+ */
+export interface HlExitOps {
+  bridgeOut(args: { amount: string; dest: "arbitrum" | "polygon"; recipient: string }): Promise<HlBridgeOutResult>;
+}
+
 /**
  * Everything the tools need, injected. server.ts constructs this once after
  * bootUnlock() and passes it on every call. Keeping it injected (vs importing
@@ -240,6 +258,9 @@ export interface ToolDeps {
   enabler: VenueEnabler;
   /** Native Polymarket bridge (gasless 1:1 PM deposit/withdraw). */
   pmBridge: PmBridgeOps;
+  /** The cheap Hyperliquid exit (HyperCore->HyperEVM->CCTP). Optional: only wired
+   *  when an HL signer is present; absent => hl_bridge_out reports "not wired". */
+  hlExit?: HlExitOps;
   /** Signs + broadcasts + confirms the UNSIGNED on-chain legs the builders produce
    *  (bridge / gas / venue-setup / EVM+SOL sweep), under inspect-before-sign. This
    *  is what lets the on-chain tools EXECUTE instead of handing back unsigned txs. */
@@ -499,6 +520,24 @@ export const MONEY_TOOLS = [
       properties: {
         toChain: { ...CHAIN_ENUM, description: "Destination chain. Its treasury address receives the funds." },
         amount: { ...STR, description: "Decimal pUSD to withdraw from the deposit wallet." },
+        ...IDEMPOTENCY,
+      },
+      required: ["toChain", "amount", "idempotencyKey"],
+    },
+  },
+  {
+    name: "hl_bridge_out",
+    description:
+      "Withdraw USDC OUT of Hyperliquid the CHEAP way: HyperCore -> HyperEVM -> CCTP -> the SEALED " +
+      "TREASURY on toChain. ~$0.003 + ~30s to any CCTP chain, vs the $1 / ~5-min / Arbitrum-only native " +
+      "withdraw3. Self-funds HYPE gas on HyperEVM (a one-time ~$10 float). Takes NO recipient argument " +
+      "(pinned treasury). Idempotent. toChain=hyperliquid mints on Arbitrum, polygon on Polygon. For a " +
+      "one-off with no HYPE float, the native withdraw3 (build_withdraw chain=hyperliquid) may be simpler.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        toChain: { type: "string" as const, enum: ["polygon", "hyperliquid"], description: "Destination: hyperliquid=Arbitrum, polygon=Polygon. Its treasury address receives the USDC." },
+        amount: { ...STR, description: "Decimal USDC to bridge out of HyperCore." },
         ...IDEMPOTENCY,
       },
       required: ["toChain", "amount", "idempotencyKey"],
@@ -1229,6 +1268,52 @@ async function handlePmWithdraw(deps: ToolDeps, a: Args): Promise<ToolText> {
   return ok({ ok: true, replayed: false, toChain, amount, recipient, txHash: res.txHash, note: res.note });
 }
 
+async function handleHlBridgeOut(deps: ToolDeps, a: Args): Promise<ToolText> {
+  const toChain = reqEnum(a, "toChain", ["polygon", "hyperliquid"] as const) as Chain;
+  const amount = reqStr(a, "amount");
+  const idempotencyKey = reqStr(a, "idempotencyKey");
+  if (!deps.signerLoaded("hyperliquid")) {
+    return fail("signer_missing", "no hyperliquid signer loaded; see auth_check");
+  }
+  if (!deps.hlExit) {
+    return fail("internal", "the cheap HL exit is not wired this run (no hyperliquid signer at boot).");
+  }
+
+  // Recipient = the SEALED TREASURY for the destination chain — never an argument.
+  let recipient: string;
+  try {
+    const treasury = await deps.treasury();
+    recipient = resolveWithdrawRecipient(treasury, { chain: toChain, amount }).recipient;
+  } catch (e) {
+    if (e instanceof WithdrawError) return fail("treasury_refused", e.message, { withdrawCode: e.code });
+    throw e;
+  }
+
+  // Reserve FIRST so a replayed key can NEVER re-run the multi-step exit.
+  const { replayed } = await reserveIntent(deps, idempotencyKey, "withdraw");
+  if (replayed) {
+    return ok({
+      ok: true,
+      replayed: true,
+      toChain,
+      note:
+        "idempotencyKey already used — the cheap exit was already started and is NOT re-run (no " +
+        "double-spend). Inspect the destination/burn; use a NEW key to retry.",
+    });
+  }
+
+  const dest = toChain === "polygon" ? "polygon" : "arbitrum"; // hyperliquid -> Arbitrum
+  const res = await deps.hlExit.bridgeOut({ amount, dest, recipient });
+  await deps.store.patch(deps.botId, idempotencyKey, {
+    state: res.ok ? "FILLED" : "FAILED",
+    txHashes: res.txHashes,
+  });
+  if (!res.ok) {
+    return fail("internal", res.blockers.join("; ") || "hl_bridge_out failed", { blockers: res.blockers, txHashes: res.txHashes, burnTxHash: res.burnTxHash, recipient, note: res.note });
+  }
+  return ok({ ok: true, replayed: false, toChain, dest, amount, recipient, txHashes: res.txHashes, burnTxHash: res.burnTxHash, note: res.note });
+}
+
 async function handleTransfer(deps: ToolDeps, a: Args): Promise<ToolText> {
   const fromChain = reqEnum(a, "fromChain", CHAINS) as Chain;
   const toChain = reqEnum(a, "toChain", CHAINS) as Chain;
@@ -1339,6 +1424,8 @@ export async function handleMoneyTool(name: string, rawArgs: unknown, deps: Tool
         return await handlePmDepositAddress(deps, a);
       case "pm_withdraw":
         return await handlePmWithdraw(deps, a);
+      case "hl_bridge_out":
+        return await handleHlBridgeOut(deps, a);
       case "transfer":
         return await handleTransfer(deps, a);
       case "advance_bridge":

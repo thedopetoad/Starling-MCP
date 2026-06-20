@@ -41,6 +41,12 @@ back UNSIGNED txs you broadcast.
   solver delivers). Fully executed across both phases — the recommended way to bridge.
 - **build_withdraw(chain=hyperliquid)** — I execute HL's native withdraw3 to your OWN
   Arbitrum address (~5 min, $1 flat HL fee). Fully executed.
+- **hl_bridge_out(toChain, amount)** — the CHEAP HL exit: HyperCore -> HyperEVM -> CCTP
+  -> the SEALED TREASURY on toChain (hyperliquid=Arbitrum, polygon=Polygon). ~$0.003 +
+  ~30s to any CCTP chain, vs withdraw3's $1/~5min/Arbitrum-only. Self-funds HYPE gas (a
+  one-time ~$10 float on HyperEVM; HL spot's $10 min order). Executes end-to-end;
+  idempotent; no recipient arg. Prefer it whenever the HYPE float exists; for a one-off
+  with no float, withdraw3 is simpler.
 - **enable_venue(polymarket)** — EXECUTES the one-time deposit-wallet setup: GASLESSLY
   (via Polymarket's relayer) deploys your per-user deposit wallet + approves the V2
   exchanges to spend its pUSD/outcome-tokens; then, if STARLING_PM_FUND_USDC is set,
