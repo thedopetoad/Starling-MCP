@@ -32,8 +32,11 @@ import { SolanaRpc } from "./solana-rpc.js";
 
 export const SOL_MINT = "So11111111111111111111111111111111111111112";
 export const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-const KNOWN_DECIMALS: Record<string, number> = { [SOL_MINT]: 9, [USDC_MINT]: 6 };
-const KNOWN_SYMBOL: Record<string, string> = { [SOL_MINT]: "SOL", [USDC_MINT]: "USDC" };
+/** JLP — the Jupiter Perps liquidity-pool token. Swap into it for PASSIVE perps-pool
+ *  exposure (earns ~75% of perps fees) via the normal swap path: jup:<USDC>:<JLP>. */
+export const JLP_MINT = "27G8MtK7VtTcCHkpASjSDdkWWYfoqT6ggEuKidVJidD4";
+const KNOWN_DECIMALS: Record<string, number> = { [SOL_MINT]: 9, [USDC_MINT]: 6, [JLP_MINT]: 6 };
+const KNOWN_SYMBOL: Record<string, string> = { [SOL_MINT]: "SOL", [USDC_MINT]: "USDC", [JLP_MINT]: "JLP" };
 
 const DEFAULT_BASE = "https://lite-api.jup.ag/swap/v1";
 const DEFAULT_TOKEN_BASE = "https://lite-api.jup.ag/tokens/v2";
