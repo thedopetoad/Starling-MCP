@@ -901,6 +901,14 @@ async function hlLeverageStage() {
   showR("leverage", await (await hlv()).updateLeverage({ marketId, leverage: Number(lev), cross }));
 }
 
+// hl-iso <market> <usdDelta>   (updateIsolatedMargin; +adds / -removes margin)
+async function hlIsoStage() {
+  const [marketId, usdDelta] = POS;
+  console.log(`hl_update_isolated_margin ${marketId} usdDelta ${usdDelta}`);
+  if (!LIVE) return void console.log("DRY — --live.");
+  showR("isoMargin", await (await hlv()).updateIsolatedMargin({ marketId, usdDelta }));
+}
+
 // hl-class <amount> <toPerp:true|false>   (perp<->spot)
 async function hlClassStage() {
   const [amount, toPerp] = POS;
@@ -938,7 +946,8 @@ async function hlTwapStage() {
   const [marketId, side, size, minutes] = POS;
   console.log(`hl_twap place ${side} ${size} ${marketId} over ${minutes}m`);
   if (!LIVE) return void console.log("DRY — --live.");
-  showR("twap", await (await hlv()).twapOrder({ marketId, side, size, minutes: Number(minutes) }));
+  const r = await (await hlv()).twapOrder({ marketId, side, size, minutes: Number(minutes) });
+  console.log("  result:", JSON.stringify(r, null, 2));
 }
 async function hlTwapCancelStage() {
   const [marketId, twapId] = POS;
@@ -947,6 +956,6 @@ async function hlTwapCancelStage() {
   showR("twapCancel", await (await hlv()).twapCancel({ marketId, twapId: Number(twapId) }));
 }
 
-const stages = { balances, swap, jup, bridge, "hl-deposit": hlDeposit, "hl-trade": hlTrade, "hl-close": hlClose, "hl-withdraw": hlWithdraw, "hl-to-evm": hlToEvm, "hl-usd-class": hlUsdClass, "hl-buy-hype": hlBuyHype, "hl-hype-to-evm": hlHypeToEvm, "hl-evm-cctp-out": hlEvmCctpOut, "hl-hype-from-evm": hlHypeFromEvm, "hl-sell-hype": hlSellHype, "pm-creds": pmCreds, "pm-enable": pmEnable, "enable-dw": enableDw, "poly-swap": polySwap, "pm-trade": pmTrade, "pm-bridge-withdraw": pmBridgeWithdraw, route, cctp, transfer, "hl-account": hlAccountStage, "hl-order": hlOrderStage, "hl-order-sl": hlOrderSlStage, "hl-cancel": hlCancelStage, "hl-leverage": hlLeverageStage, "hl-class": hlClassStage, "hl-vault": hlVaultStage, "hl-stake": hlStakeStage, "hl-delegate": hlDelegateStage, "hl-twap": hlTwapStage, "hl-twap-cancel": hlTwapCancelStage };
+const stages = { balances, swap, jup, bridge, "hl-deposit": hlDeposit, "hl-trade": hlTrade, "hl-close": hlClose, "hl-withdraw": hlWithdraw, "hl-to-evm": hlToEvm, "hl-usd-class": hlUsdClass, "hl-buy-hype": hlBuyHype, "hl-hype-to-evm": hlHypeToEvm, "hl-evm-cctp-out": hlEvmCctpOut, "hl-hype-from-evm": hlHypeFromEvm, "hl-sell-hype": hlSellHype, "pm-creds": pmCreds, "pm-enable": pmEnable, "enable-dw": enableDw, "poly-swap": polySwap, "pm-trade": pmTrade, "pm-bridge-withdraw": pmBridgeWithdraw, route, cctp, transfer, "hl-account": hlAccountStage, "hl-order": hlOrderStage, "hl-order-sl": hlOrderSlStage, "hl-cancel": hlCancelStage, "hl-leverage": hlLeverageStage, "hl-iso": hlIsoStage, "hl-class": hlClassStage, "hl-vault": hlVaultStage, "hl-stake": hlStakeStage, "hl-delegate": hlDelegateStage, "hl-twap": hlTwapStage, "hl-twap-cancel": hlTwapCancelStage };
 if (!stages[stage]) { console.log("stages:", Object.keys(stages).join(", ")); process.exit(1); }
 await stages[stage]();

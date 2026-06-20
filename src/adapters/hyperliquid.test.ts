@@ -148,3 +148,24 @@ test("classifyHlResponse treats a non-ok status + per-order error as a rejection
   assert.equal(perOrder.posted, false);
   assert.match(perOrder.error ?? "", /price invalid/);
 });
+
+test("classifyHlResponse handles the singular `status` shape (TWAP) + no-payload defaults", () => {
+  // TWAP rejection rides in data.status.error (NOT data.statuses) — must be caught.
+  const twapErr = classifyHlResponse(true, {
+    status: "ok",
+    response: { type: "twapOrder", data: { status: { error: "TWAP order value too small. Min is $50" } } },
+  });
+  assert.equal(twapErr.posted, false);
+  assert.match(twapErr.error ?? "", /too small/);
+  // TWAP accept surfaces the twapId as orderId.
+  const twapOk = classifyHlResponse(true, {
+    status: "ok",
+    response: { type: "twapOrder", data: { status: { running: { twapId: 4242 } } } },
+  });
+  assert.equal(twapOk.posted, true);
+  assert.equal(twapOk.orderId, "4242");
+  // A no-payload default (leverage / transfers / staking) is a plain success.
+  const dflt = classifyHlResponse(true, { status: "ok", response: { type: "default" } });
+  assert.equal(dflt.posted, true);
+  assert.equal(dflt.status, "accepted");
+});

@@ -60,11 +60,15 @@ export async function postExchange(payload: HlExchangePayload, opts: HlTransport
 }
 
 /**
- * Map an /exchange reply to SubmitResult. Success envelope:
- *   {status:"ok", response:{type:"order", data:{statuses:[
- *      {filled:{totalSz, avgPx, oid}} | {resting:{oid}} | {error:"…"} ]}}}
- * Anything else (status!="ok", a string error, or a per-order {error}) is a
- * rejection — we DON'T pretend a posted-but-unfilled IOC succeeded.
+ * Map an /exchange reply to SubmitResult. HL uses TWO error/result shapes and we
+ * MUST check both or a rejection is misread as success:
+ *   - order / cancel / modify: data.statuses ARRAY of
+ *       {filled:{totalSz,avgPx,oid}} | {resting:{oid}} | {error:"…"}
+ *   - twap (and other single-result actions): data.status OBJECT —
+ *       {error:"…"} on rejection or {running:{twapId}} on accept
+ *   - actions with no payload (leverage / transfers / staking): {type:"default"}.
+ * Anything with status!="ok", a string error, or an embedded {error} is a rejection
+ * — we DON'T pretend a posted-but-unfilled IOC (or a too-small TWAP) succeeded.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function classifyHlResponse(httpOk: boolean, json: any): SubmitResult {
@@ -72,18 +76,28 @@ export function classifyHlResponse(httpOk: boolean, json: any): SubmitResult {
     const msg = typeof json?.response === "string" ? json.response : JSON.stringify(json ?? {});
     return { posted: false, status: "rejected", error: httpOk ? msg : `HTTP error: ${msg}`, raw: json };
   }
-  const statuses = json?.response?.data?.statuses ?? [];
-  const first = statuses[0] ?? {};
-  if (first.error) {
-    return { posted: false, status: "rejected", error: String(first.error), raw: json };
+  const data = json?.response?.data;
+  // Order / cancel / modify: a per-item `statuses` ARRAY.
+  if (Array.isArray(data?.statuses)) {
+    const first = data.statuses[0] ?? {};
+    if (first.error) return { posted: false, status: "rejected", error: String(first.error), raw: json };
+    const filled = first.filled;
+    const resting = first.resting;
+    const oid = filled?.oid ?? resting?.oid;
+    return {
+      posted: true,
+      orderId: oid !== undefined ? String(oid) : undefined,
+      status: filled ? "filled" : resting ? "resting" : "accepted",
+      raw: json,
+    };
   }
-  const filled = first.filled;
-  const resting = first.resting;
-  const oid = filled?.oid ?? resting?.oid;
-  return {
-    posted: true,
-    orderId: oid !== undefined ? String(oid) : undefined,
-    status: filled ? "filled" : resting ? "resting" : "accepted",
-    raw: json,
-  };
+  // TWAP (and other single-result actions): a SINGULAR `status` OBJECT.
+  const single = data?.status;
+  if (single && typeof single === "object") {
+    if (single.error) return { posted: false, status: "rejected", error: String(single.error), raw: json };
+    const twapId = single.running?.twapId;
+    return { posted: true, orderId: twapId !== undefined && twapId !== null ? String(twapId) : undefined, status: "accepted", raw: json };
+  }
+  // No data payload (e.g. {type:"default"} for leverage / transfers / staking) => OK.
+  return { posted: true, status: "accepted", raw: json };
 }

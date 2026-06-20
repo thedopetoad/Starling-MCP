@@ -172,6 +172,8 @@ class HlVenue implements HlVenueOps {
     if ("error" in m) return rejected(m.error);
     const sz = roundSz(Number(a.size), m.resolved.szDecimals);
     if (!(sz > 0)) return rejected(`twap size rounds to 0 at szDecimals=${m.resolved.szDecimals}`);
+    // classifyHlResponse surfaces the twap id (data.status.running.twapId) as orderId
+    // and correctly flags a too-small-TWAP rejection (data.status.error).
     return this.postL1(buildTwapOrderAction({ assetIndex: m.resolved.assetIndex, isBuy: a.side === "buy", sz, reduceOnly: a.reduceOnly ?? false, minutes: a.minutes, randomize: a.randomize ?? false }));
   }
 
@@ -193,11 +195,20 @@ class HlVenue implements HlVenueOps {
   /** HYPE native wei-decimals (cached) — the unit cDeposit/cWithdraw/tokenDelegate use. */
   private async hypeWeiDecimals(): Promise<number> {
     if (this.hypeWei != null) return this.hypeWei;
-    const r = await resolveHlAsset("hlspot:HYPE", { host: this.host });
-    const wd = r.resolved?.weiDecimals;
-    if (!(typeof wd === "number" && wd > 0)) throw new Error("could not resolve HYPE wei-decimals from spotMeta");
-    this.hypeWei = wd;
-    return wd;
+    try {
+      const r = await resolveHlAsset("hlspot:HYPE", { host: this.host });
+      const wd = r.resolved?.weiDecimals;
+      if (typeof wd === "number" && wd > 0) {
+        this.hypeWei = wd;
+        return wd;
+      }
+    } catch {
+      /* fall through to the known constant on a transient spotMeta hiccup */
+    }
+    // HYPE's native wei-decimals is a stable known constant (8). Fall back to it so a
+    // transient spotMeta read can't break staking/delegation.
+    this.hypeWei = 8;
+    return 8;
   }
 
   /** Open order ids on a single market (perp coin OR spot "@pairIndex"). */
