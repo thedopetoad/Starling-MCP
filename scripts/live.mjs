@@ -478,6 +478,40 @@ async function hlEvmCctpOut() {
   console.log(`\n  ✓ Arbitrum USDC ${fmt(arbBefore, 6)} -> ${fmt(arbAfter, 6)} (+${fmt(arbAfter - arbBefore, 6)}) — HyperEVM->Arbitrum CCTP, gas paid in HYPE.`);
 }
 
+// ── native HYPE HyperEVM -> HyperCore (reverse of hl-hype-to-evm). A native value
+// transfer to the special HYPE system address credits HyperCore spot. Keep a sliver
+// for the tx's own gas. usage: hl-hype-from-evm <amount> [--live]
+async function hlHypeFromEvm() {
+  const amt = arg || "0.005";
+  const signer = getEvmSigner("hyperliquid");
+  const heRpc = new EvmRpc({ net: "hyperevm" });
+  const HYPE_SYS = "0x2222222222222222222222222222222222222222";
+  console.log(`native HYPE ${amt} HyperEVM -> HyperCore via ${HYPE_SYS}`);
+  if (!LIVE) return void console.log("DRY — --live.");
+  const r = await signAndSendEvm({ to: HYPE_SYS, data: "0x", value: BigInt(Math.round(Number(amt) * 1e18)) }, signer, heRpc);
+  console.log("  result:", { ok: r.ok, status: r.status, txHash: r.txHash });
+}
+
+// ── spot SELL HYPE -> USDC on HL (asset 10107). usage: hl-sell-hype <hypeSize> [--live]
+async function hlSellHype() {
+  const size = arg || "0.15";
+  const { signL1Action } = await import("../dist/adapters/hl-signing.js");
+  const { postExchange, HL_MAINNET, infoPost } = await import("../dist/adapters/hl-transport.js");
+  const { floatToWire, roundPx } = await import("../dist/adapters/hyperliquid.js");
+  const signer = getEvmSigner("hyperliquid");
+  const mids = await infoPost({ type: "allMids" }, { host: HL_MAINNET });
+  const mid = Number(mids["@107"]);
+  const limit = roundPx(mid * 0.97, 2); // generous IOC sell floor
+  const order = { a: 10107, b: false, p: floatToWire(limit), s: floatToWire(Number(size)), r: false, t: { limit: { tif: "Ioc" } } };
+  const action = { type: "order", orders: [order], grouping: "na" };
+  const nonce = Date.now();
+  const sig = signL1Action({ signer, action, nonce, vaultAddress: null, isMainnet: true });
+  console.log(`spot SELL ${size} HYPE @ limit ${limit} (mid ${mid}) -> ~$${(Number(size) * mid).toFixed(2)}`);
+  if (!LIVE) return void console.log("DRY — --live.");
+  const r = await postExchange({ action, nonce, signature: sig, vaultAddress: null }, { host: HL_MAINNET });
+  console.log("  result:", JSON.stringify({ posted: r.posted, status: r.status, error: r.error, raw: r.raw }));
+}
+
 // ── Polymarket L2 CLOB cred derivation (createOrDeriveApiKey) ────────────────
 // L1 ClobAuth EIP-712 (domain ClobAuthDomain v1 chainId 137, no verifyingContract)
 // signed by the EOA -> L1 headers -> POST /auth/api-key (create) else GET
@@ -822,6 +856,6 @@ async function pmBridgeWithdraw() {
   }
 }
 
-const stages = { balances, swap, jup, bridge, "hl-deposit": hlDeposit, "hl-trade": hlTrade, "hl-close": hlClose, "hl-withdraw": hlWithdraw, "hl-to-evm": hlToEvm, "hl-usd-class": hlUsdClass, "hl-buy-hype": hlBuyHype, "hl-hype-to-evm": hlHypeToEvm, "hl-evm-cctp-out": hlEvmCctpOut, "pm-creds": pmCreds, "pm-enable": pmEnable, "enable-dw": enableDw, "poly-swap": polySwap, "pm-trade": pmTrade, "pm-bridge-withdraw": pmBridgeWithdraw, route, cctp, transfer };
+const stages = { balances, swap, jup, bridge, "hl-deposit": hlDeposit, "hl-trade": hlTrade, "hl-close": hlClose, "hl-withdraw": hlWithdraw, "hl-to-evm": hlToEvm, "hl-usd-class": hlUsdClass, "hl-buy-hype": hlBuyHype, "hl-hype-to-evm": hlHypeToEvm, "hl-evm-cctp-out": hlEvmCctpOut, "hl-hype-from-evm": hlHypeFromEvm, "hl-sell-hype": hlSellHype, "pm-creds": pmCreds, "pm-enable": pmEnable, "enable-dw": enableDw, "poly-swap": polySwap, "pm-trade": pmTrade, "pm-bridge-withdraw": pmBridgeWithdraw, route, cctp, transfer };
 if (!stages[stage]) { console.log("stages:", Object.keys(stages).join(", ")); process.exit(1); }
 await stages[stage]();
