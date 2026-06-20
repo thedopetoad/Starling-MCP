@@ -194,15 +194,17 @@ class JupVenue implements JupVenueOps {
   }
 
   async predExit(a: JupPredExitArgs): Promise<SubmitResult> {
-    const r = await jupDelete<{ transaction?: string; error?: string }>(`/prediction/v1/positions/${a.positionPubkey}`, { ownerPubkey: this.user() });
+    const r = await jupDelete<{ transaction?: string; txMeta?: { lastValidBlockHeight?: number }; error?: string }>(`/prediction/v1/positions/${a.positionPubkey}`, { ownerPubkey: this.user() });
     if (!r.transaction) return rejected(r.error ?? "prediction exit returned no transaction");
-    return signAndBroadcast({ unsignedTxB64: r.transaction });
+    // Multi-sig pre-signed (Jupiter co-signs) -> pass the baked-blockhash height so we
+    // DON'T refresh it (refreshing would invalidate Jupiter's pre-signature).
+    return signAndBroadcast({ unsignedTxB64: r.transaction, lastValidBlockHeight: r.txMeta?.lastValidBlockHeight });
   }
 
   async predClaim(a: JupPredExitArgs): Promise<SubmitResult> {
-    const r = await jupPost<{ transaction?: string; error?: string }>(`/prediction/v1/positions/${a.positionPubkey}/claim`, { ownerPubkey: this.user() });
+    const r = await jupPost<{ transaction?: string; txMeta?: { lastValidBlockHeight?: number }; error?: string }>(`/prediction/v1/positions/${a.positionPubkey}/claim`, { ownerPubkey: this.user() });
     if (!r.transaction) return rejected(r.error ?? "prediction claim returned no transaction");
-    return signAndBroadcast({ unsignedTxB64: r.transaction });
+    return signAndBroadcast({ unsignedTxB64: r.transaction, lastValidBlockHeight: r.txMeta?.lastValidBlockHeight });
   }
 }
 

@@ -93,3 +93,37 @@ test("signTransaction REFUSES when the fee payer isn't us", () => {
     (e: unknown) => e instanceof SolanaTxError && e.code === "fee_payer_mismatch",
   );
 });
+
+// A synthetic UNSIGNED v0 tx requiring 2 signers: shortvec(2) + sig0(empty) + sig1 +
+// message(2 required sigs, 2 static keys). Models a Jupiter prediction order where the
+// order account (slot 1) is PRE-SIGNED and our wallet (fee payer, slot 0) signs.
+function synthetic2SigTx(feePayer: Uint8Array, coSigner: Uint8Array, coSig: Uint8Array): { b64: string; message: Uint8Array } {
+  const blockhash = new Uint8Array(32).fill(7);
+  const msg = [0x80, 2, 0, 0, 2, ...feePayer, ...coSigner, ...blockhash, 0, 0];
+  const message = Uint8Array.from(msg);
+  const tx = [2, ...new Array(64).fill(0), ...coSig, ...msg];
+  return { b64: Buffer.from(Uint8Array.from(tx)).toString("base64"), message };
+}
+
+test("signTransaction PARTIAL multi-sig: fills our fee-payer slot, preserves the pre-signed co-signer", () => {
+  const seed = ed25519.utils.randomPrivateKey();
+  const pub = ed25519.getPublicKey(seed);
+  const coPub = ed25519.getPublicKey(ed25519.utils.randomPrivateKey());
+  const coSig = Uint8Array.from(new Array(64).fill(9)); // pretend the co-signer already signed
+  const { b64, message } = synthetic2SigTx(pub, coPub, coSig);
+  const { signedTxB64 } = signTransaction(b64, signerFor(seed));
+  const signed = Uint8Array.from(Buffer.from(signedTxB64, "base64"));
+  assert.ok(ed25519.verify(signed.subarray(1, 65), message, pub), "our slot-0 sig verifies");
+  assert.deepEqual(Array.from(signed.subarray(65, 129)), Array.from(coSig), "co-signer slot preserved untouched");
+});
+
+test("signTransaction REFUSES a multi-sig tx whose foreign co-signer slot is still empty", () => {
+  const seed = ed25519.utils.randomPrivateKey();
+  const pub = ed25519.getPublicKey(seed);
+  const coPub = ed25519.getPublicKey(ed25519.utils.randomPrivateKey());
+  const { b64 } = synthetic2SigTx(pub, coPub, new Uint8Array(64)); // co-signer slot empty
+  assert.throws(
+    () => signTransaction(b64, signerFor(seed)),
+    (e: unknown) => e instanceof SolanaTxError && e.code === "missing_cosigner",
+  );
+});

@@ -130,19 +130,26 @@ export interface SignResult {
 
 /**
  * Sign an unsigned base64 transaction with the local signer and return the signed
- * base64 + the txid. REFUSES (throws) unless the tx requires exactly one signature
- * and account index 0 is the signer's address — we never sign a tx whose fee payer
- * isn't us, and never leave a foreign required-signer slot unfilled.
+ * base64 + the txid. We ALWAYS sign exactly ONE slot — the fee payer (account index
+ * 0), which MUST be our address. Two cases:
+ *   - single-signer (numRequiredSignatures == 1): the common path (swap, lend, …).
+ *   - PARTIAL multi-sig (numRequiredSignatures > 1): a co-signer (e.g. Jupiter's
+ *     prediction order account) has ALREADY pre-signed its slot; we only fill OUR
+ *     fee-payer slot. We REFUSE if any OTHER required-signer slot is still empty —
+ *     we never sign for a key we don't hold, and never broadcast a tx that can't land.
+ * NOTE for the multi-sig case: the co-signer signed over the message INCLUDING its
+ * blockhash, so the caller must NOT refresh the blockhash (signAndBroadcast only
+ * refreshes when no lastValidBlockHeight is supplied; these flows always supply one).
  */
 export function signTransaction(unsignedTxB64: string, signer: MessageSigner): SignResult {
   const buf = Uint8Array.from(Buffer.from(unsignedTxB64, "base64"));
   const { sigCount, sigStart, message } = parseTx(buf);
 
   const { numRequiredSignatures, feePayer } = readFeePayer(message);
-  if (numRequiredSignatures !== 1 || sigCount !== 1) {
+  if (sigCount !== numRequiredSignatures) {
     throw new SolanaTxError(
-      "multisig_unsupported",
-      `tx needs ${numRequiredSignatures} signatures (sigCount ${sigCount}); only single-signer txs are supported`,
+      "bad_sig_count",
+      `tx sig slots (${sigCount}) != numRequiredSignatures (${numRequiredSignatures})`,
     );
   }
   if (feePayer !== signer.address) {
@@ -151,11 +158,25 @@ export function signTransaction(unsignedTxB64: string, signer: MessageSigner): S
       `tx fee payer ${feePayer} != our address ${signer.address} — refusing to sign`,
     );
   }
+  // PARTIAL multi-sig: every OTHER required-signer slot must already be filled (a
+  // co-signer pre-signed it). An empty foreign slot means we'd be expected to hold a
+  // key we don't — refuse rather than broadcast an unsignable tx.
+  for (let i = 1; i < numRequiredSignatures; i++) {
+    const off = sigStart + i * 64;
+    let empty = true;
+    for (let j = off; j < off + 64; j++) if (buf[j] !== 0) { empty = false; break; }
+    if (empty) {
+      throw new SolanaTxError(
+        "missing_cosigner",
+        `required signer slot ${i} is unsigned and is not ours — refusing (only the fee-payer slot is ours to sign)`,
+      );
+    }
+  }
 
   const sig = signer.signBytes(message); // 64 bytes over the FULL message
   if (sig.length !== 64) throw new SolanaTxError("bad_signature", `expected 64-byte signature, got ${sig.length}`);
   const signed = Uint8Array.from(buf); // copy
-  signed.set(sig, sigStart); // overwrite slot 0 (fee payer)
+  signed.set(sig, sigStart); // overwrite slot 0 (fee payer = us); other slots preserved
   return {
     signedTxB64: Buffer.from(signed).toString("base64"),
     txid: base58.encode(sig),

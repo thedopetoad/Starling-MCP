@@ -956,6 +956,45 @@ async function hlTwapCancelStage() {
   showR("twapCancel", await (await hlv()).twapCancel({ marketId, twapId: Number(twapId) }));
 }
 
-const stages = { balances, swap, jup, bridge, "hl-deposit": hlDeposit, "hl-trade": hlTrade, "hl-close": hlClose, "hl-withdraw": hlWithdraw, "hl-to-evm": hlToEvm, "hl-usd-class": hlUsdClass, "hl-buy-hype": hlBuyHype, "hl-hype-to-evm": hlHypeToEvm, "hl-evm-cctp-out": hlEvmCctpOut, "hl-hype-from-evm": hlHypeFromEvm, "hl-sell-hype": hlSellHype, "pm-creds": pmCreds, "pm-enable": pmEnable, "enable-dw": enableDw, "poly-swap": polySwap, "pm-trade": pmTrade, "pm-bridge-withdraw": pmBridgeWithdraw, route, cctp, transfer, "hl-account": hlAccountStage, "hl-order": hlOrderStage, "hl-order-sl": hlOrderSlStage, "hl-cancel": hlCancelStage, "hl-leverage": hlLeverageStage, "hl-iso": hlIsoStage, "hl-class": hlClassStage, "hl-vault": hlVaultStage, "hl-stake": hlStakeStage, "hl-delegate": hlDelegateStage, "hl-twap": hlTwapStage, "hl-twap-cancel": hlTwapCancelStage };
+// ════════ NEW: the Jupiter advanced surface (limit/recurring/lend/prediction) via the
+// REAL makeRealJupVenue() ops the jup_* tools use. DRY prints intent; --live executes.
+async function jv() { const { makeRealJupVenue } = await import("../dist/adapters/jupiter-venue.js"); return makeRealJupVenue(); }
+const dump = (x) => console.log(JSON.stringify(x, null, 2).slice(0, 2500));
+
+// jup-limit-create <inputMint> <outputMint> <makingAmount> <takingAmount>
+async function jupLimitCreate() {
+  const [inputMint, outputMint, makingAmount, takingAmount] = POS;
+  console.log(`jup_limit_create sell ${makingAmount} ${inputMint.slice(0, 6)} -> ${takingAmount} ${outputMint.slice(0, 6)}`);
+  if (!LIVE) return void console.log("DRY — --live.");
+  showR("limitCreate", await (await jv()).limitCreate({ inputMint, outputMint, makingAmount, takingAmount }));
+}
+async function jupLimitCancel() { const [order] = POS; console.log(`jup_limit_cancel ${order}`); if (!LIVE) return void console.log("DRY — --live."); showR("limitCancel", await (await jv()).limitCancel({ order })); }
+async function jupLimitList() { dump(await (await jv()).limitList("active")); }
+
+// jup-recurring-create <inputMint> <outputMint> <inAmount> <numberOfOrders> <interval> [startAt]
+async function jupRecurringCreate() {
+  const [inputMint, outputMint, inAmount, numberOfOrders, interval, startAt] = POS;
+  console.log(`jup_recurring_create ${inAmount} over ${numberOfOrders}x@${interval}s startAt=${startAt ?? "now"}`);
+  if (!LIVE) return void console.log("DRY — --live.");
+  showR("recurringCreate", await (await jv()).recurringCreate({ inputMint, outputMint, inAmount, numberOfOrders: Number(numberOfOrders), interval: Number(interval), startAt: startAt ? Number(startAt) : undefined }));
+}
+async function jupRecurringCancel() { const [order] = POS; console.log(`jup_recurring_cancel ${order}`); if (!LIVE) return void console.log("DRY — --live."); showR("recurringCancel", await (await jv()).recurringCancel({ order })); }
+async function jupRecurringList() { dump(await (await jv()).recurringList("active")); }
+
+// jup-lend-deposit/withdraw <assetMint> <amount>
+async function jupLendDeposit() { const [asset, amount] = POS; console.log(`jup_lend_deposit ${amount} ${asset}`); if (!LIVE) return void console.log("DRY — --live."); showR("lendDeposit", await (await jv()).lendDeposit({ asset, amount })); }
+async function jupLendWithdraw() { const [asset, amount] = POS; console.log(`jup_lend_withdraw ${amount} ${asset}`); if (!LIVE) return void console.log("DRY — --live."); showR("lendWithdraw", await (await jv()).lendWithdraw({ asset, amount })); }
+async function jupLendMarkets() { dump(await (await jv()).lendTokens()); }
+async function jupLendPositions() { dump(await (await jv()).lendPositions()); }
+
+// jup-pred-markets [filter]  (needs STARLING_JUP_API_KEY; geo-blocked US/KR)
+async function jupPredMarkets() { dump(await (await jv()).predEvents({ filter: POS[0] || "trending" })); }
+// jup-pred-buy <marketId> <yes|no> <usd>
+async function jupPredBuy() { const [marketId, side, usd] = POS; console.log(`jup_pred_buy ${side} $${usd} ${marketId}`); if (!LIVE) return void console.log("DRY — --live."); showR("predBuy", await (await jv()).predOrder({ marketId, isYes: side === "yes", usd })); }
+async function jupPredPositions() { dump(await (await jv()).predPositions()); }
+async function jupPredExit() { const [pos] = POS; console.log(`jup_pred_exit ${pos}`); if (!LIVE) return void console.log("DRY — --live."); showR("predExit", await (await jv()).predExit({ positionPubkey: pos })); }
+async function jupPredClaim() { const [pos] = POS; console.log(`jup_pred_claim ${pos}`); if (!LIVE) return void console.log("DRY — --live."); showR("predClaim", await (await jv()).predClaim({ positionPubkey: pos })); }
+
+const stages = { balances, swap, jup, bridge, "hl-deposit": hlDeposit, "hl-trade": hlTrade, "hl-close": hlClose, "hl-withdraw": hlWithdraw, "hl-to-evm": hlToEvm, "hl-usd-class": hlUsdClass, "hl-buy-hype": hlBuyHype, "hl-hype-to-evm": hlHypeToEvm, "hl-evm-cctp-out": hlEvmCctpOut, "hl-hype-from-evm": hlHypeFromEvm, "hl-sell-hype": hlSellHype, "pm-creds": pmCreds, "pm-enable": pmEnable, "enable-dw": enableDw, "poly-swap": polySwap, "pm-trade": pmTrade, "pm-bridge-withdraw": pmBridgeWithdraw, route, cctp, transfer, "hl-account": hlAccountStage, "hl-order": hlOrderStage, "hl-order-sl": hlOrderSlStage, "hl-cancel": hlCancelStage, "hl-leverage": hlLeverageStage, "hl-iso": hlIsoStage, "hl-class": hlClassStage, "hl-vault": hlVaultStage, "hl-stake": hlStakeStage, "hl-delegate": hlDelegateStage, "hl-twap": hlTwapStage, "hl-twap-cancel": hlTwapCancelStage, "jup-limit-create": jupLimitCreate, "jup-limit-cancel": jupLimitCancel, "jup-limit-list": jupLimitList, "jup-recurring-create": jupRecurringCreate, "jup-recurring-cancel": jupRecurringCancel, "jup-recurring-list": jupRecurringList, "jup-lend-deposit": jupLendDeposit, "jup-lend-withdraw": jupLendWithdraw, "jup-lend-markets": jupLendMarkets, "jup-lend-positions": jupLendPositions, "jup-pred-markets": jupPredMarkets, "jup-pred-buy": jupPredBuy, "jup-pred-positions": jupPredPositions, "jup-pred-exit": jupPredExit, "jup-pred-claim": jupPredClaim };
 if (!stages[stage]) { console.log("stages:", Object.keys(stages).join(", ")); process.exit(1); }
 await stages[stage]();

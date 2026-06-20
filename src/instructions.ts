@@ -140,6 +140,26 @@ OUT is hl_bridge_out / withdraw3), so NONE take a recipient.
 - **hl_delegate** — delegate / undelegate staked HYPE to a validator for staking rewards.
 - **hl_twap** — place or cancel a TWAP order (slices a large size over N minutes).
 
+## Jupiter full surface (jup_* tools)
+Beyond spot swap (open_position/close_position with a 'jup:<quote>:<asset>' pair), the
+broader Jupiter suite is wired — all keyless REST returning an unsigned Solana tx the
+local key signs (the swap pattern). Orders escrow to a user-cancellable account, so none
+take a recipient. Set STARLING_JUP_API_KEY to use api.jup.ag (needed for Prediction).
+- **jup_limit_create / jup_limit_cancel / jup_limit_list** — LIMIT (Trigger) orders; the
+  price is implied by makingAmount (sell) / takingAmount (buy). PROVEN LIVE.
+- **jup_recurring_create / jup_recurring_cancel / jup_recurring_list** — recurring/DCA
+  (time-based: buy inAmount over N cycles 'interval' seconds apart). Min ~$50 PER cycle.
+- **jup_lend_deposit / jup_lend_withdraw** — Jupiter Lend EARN (yield, withdraw anytime).
+  PROVEN LIVE. **jup_lend_borrow** — collateralized borrow (advanced: signed RAW col/debt
+  amounts, creates debt). **jup_lend_markets / jup_lend_positions** — reads.
+- **jup_pred_markets / jup_pred_buy / jup_pred_exit / jup_pred_claim / jup_pred_positions**
+  — binary PREDICTION markets (these are Polymarket markets on Solana). Buy YES/NO ($5 min),
+  exit before resolution, claim a resolved winner. Reads PROVEN LIVE; trading is GEO-BLOCKED
+  in US/KR and needs STARLING_JUP_API_KEY.
+- **JLP (perps-pool LP)** — passive Jupiter-Perps exposure by SWAPPING into the JLP token:
+  open_position 'jup:<USDC>:27G8MtK7VtTcCHkpASjSDdkWWYfoqT6ggEuKidVJidD4'. Active leveraged
+  perps are an on-chain program (no REST) and are NOT yet wired.
+
 ## Funding & gas (WIRED — 'transfer'/'advance_bridge' EXECUTE; build_* are lower-level)
 - **CCTP** — the ~1:1 USDC rail between EVM chains (Polygon <-> Arbitrum). Needs
   'STARLING_RPC_POLYGON' / 'STARLING_RPC_ARBITRUM' for the mint-proof. Standard
