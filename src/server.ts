@@ -26,6 +26,7 @@ import { makeRealVenueEnabler } from "./adapters/venue-enabler.js";
 import { makeRealPmBridge } from "./adapters/pm-bridge-ops.js";
 import { makeRealHlExit } from "./adapters/hl-exit.js";
 import { makeRealHlVenue } from "./adapters/hl-venue.js";
+import { makeRealJupVenue } from "./adapters/jupiter-venue.js";
 import { DeBridgeBridge } from "./bridge/debridge.js";
 import { cctpBridge } from "./bridge/cctp.js";
 import type { NativeBalanceReader } from "./bridge/gas.js";
@@ -235,6 +236,9 @@ export function buildToolDeps(): ToolDeps {
     // The full HyperCore surface (spot, advanced orders, leverage, vaults, staking,
     // TWAP). Only when an HL signer exists.
     hlVenue: addrs.hyperliquid ? makeRealHlVenue() : undefined,
+    // The Jupiter surface beyond swap (limit/trigger orders, recurring/DCA, …).
+    // Only when a Solana signer exists.
+    jupVenue: addrs.solana ? makeRealJupVenue() : undefined,
     // Signs + broadcasts + confirms the on-chain legs locally (same broadcasters
     // the harness uses). The on-chain tools call this to EXECUTE, not just build.
     executor: makeExecutor(),

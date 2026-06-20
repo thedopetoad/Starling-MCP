@@ -287,6 +287,49 @@ export interface HlVenueOps {
   twapCancel(a: HlTwapCancelArgs): Promise<SubmitResult>;
 }
 
+// ── the Jupiter surface BEYOND spot swap (limit/trigger orders + recurring/DCA;
+//    lend + prediction added incrementally) ──────────────────────────────────────
+// All keyless REST that returns an unsigned base64 Solana tx the local key signs (the
+// swap-adapter pattern). Funds escrow to a user-cancellable order account, so no recipient.
+
+/** A Jupiter limit (Trigger) order. Limit price is implied by makingAmount/takingAmount. */
+export interface JupLimitArgs {
+  inputMint: string;
+  outputMint: string;
+  makingAmount: string; // decimal UI amount of inputMint to sell
+  takingAmount: string; // decimal UI amount of outputMint wanted (price = taking/making)
+  slippageBps?: number;
+  expiredAt?: number; // unix seconds
+}
+export interface JupLimitCancelArgs { order: string }
+/** A Jupiter recurring (DCA) order — time-based: buy `inAmount` total over N cycles. */
+export interface JupRecurringArgs {
+  inputMint: string;
+  outputMint: string;
+  inAmount: string; // decimal UI total input across all cycles
+  numberOfOrders: number;
+  interval: number; // seconds between cycles
+  minPrice?: number;
+  maxPrice?: number;
+  startAt?: number; // unix seconds; omit for immediate
+}
+export interface JupRecurringCancelArgs { order: string }
+
+/**
+ * The Jupiter advanced surface as an injectable ops object (mirrors HlVenueOps). Each
+ * write EXECUTES (REST -> local-sign -> land) and returns a SubmitResult; list reads
+ * return the raw JSON. Wired in server.ts only when a Solana signer is loaded; absent
+ * => the jup_* tools report "not wired".
+ */
+export interface JupVenueOps {
+  limitCreate(a: JupLimitArgs): Promise<SubmitResult>;
+  limitCancel(a: JupLimitCancelArgs): Promise<SubmitResult>;
+  limitList(status: "active" | "history"): Promise<unknown>;
+  recurringCreate(a: JupRecurringArgs): Promise<SubmitResult>;
+  recurringCancel(a: JupRecurringCancelArgs): Promise<SubmitResult>;
+  recurringList(status: "active" | "history"): Promise<unknown>;
+}
+
 /**
  * Everything the tools need, injected. server.ts constructs this once after
  * bootUnlock() and passes it on every call. Keeping it injected (vs importing
@@ -316,6 +359,10 @@ export interface ToolDeps {
    *  TWAP). Optional: only wired when an HL signer is present; absent => the hl_*
    *  tools report "not wired". */
   hlVenue?: HlVenueOps;
+  /** The Jupiter surface beyond swap (limit/trigger orders, recurring/DCA, …).
+   *  Optional: only wired when a Solana signer is present; absent => the jup_* tools
+   *  report "not wired". */
+  jupVenue?: JupVenueOps;
   /** Signs + broadcasts + confirms the UNSIGNED on-chain legs the builders produce
    *  (bridge / gas / venue-setup / EVM+SOL sweep), under inspect-before-sign. This
    *  is what lets the on-chain tools EXECUTE instead of handing back unsigned txs. */
@@ -808,6 +855,89 @@ export const MONEY_TOOLS = [
         ...IDEMPOTENCY,
       },
       required: ["action", "marketId", "idempotencyKey"],
+    },
+  },
+  {
+    name: "jup_limit_create",
+    description:
+      "Create a Jupiter LIMIT order (Trigger API) on Solana: sell makingAmount of inputMint for at " +
+      "least takingAmount of outputMint (limit price = takingAmount / makingAmount). Amounts are " +
+      "decimal UI units. Signs locally + lands via Jupiter. Returns the order account (use it to cancel). " +
+      "Idempotent.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        inputMint: { ...STR, description: "Mint of the token being sold (SPL base58)." },
+        outputMint: { ...STR, description: "Mint of the token being bought." },
+        makingAmount: { ...STR, description: "Decimal amount of inputMint to sell." },
+        takingAmount: { ...STR, description: "Decimal amount of outputMint wanted (sets the limit price)." },
+        slippageBps: { ...NUM, description: "Optional slippage cap in bps." },
+        expiredAt: { ...NUM, description: "Optional expiry, unix seconds." },
+        ...IDEMPOTENCY,
+      },
+      required: ["inputMint", "outputMint", "makingAmount", "takingAmount", "idempotencyKey"],
+    },
+  },
+  {
+    name: "jup_limit_cancel",
+    description: "Cancel a Jupiter limit (Trigger) order by its order account address. Idempotent.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        order: { ...STR, description: "The order account (from jup_limit_create / jup_limit_list)." },
+        ...IDEMPOTENCY,
+      },
+      required: ["order", "idempotencyKey"],
+    },
+  },
+  {
+    name: "jup_limit_list",
+    description: "Read-only: a user's Jupiter limit (Trigger) orders. No idempotency key.",
+    inputSchema: {
+      type: "object" as const,
+      properties: { status: { type: "string" as const, enum: ["active", "history"], description: "Default active." } },
+    },
+  },
+  {
+    name: "jup_recurring_create",
+    description:
+      "Create a Jupiter RECURRING (DCA) order on Solana: buy outputMint with inAmount of inputMint " +
+      "split across numberOfOrders cycles, `interval` seconds apart (time-based). Optional min/max price " +
+      "guardrails. Amounts are decimal UI units. Signs locally + lands via Jupiter. Idempotent.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        inputMint: STR,
+        outputMint: STR,
+        inAmount: { ...STR, description: "Decimal TOTAL input across all cycles." },
+        numberOfOrders: { ...NUM, description: "Number of cycles." },
+        interval: { ...NUM, description: "Seconds between cycles (e.g. 86400 = daily)." },
+        minPrice: { ...NUM, description: "Optional min price guardrail." },
+        maxPrice: { ...NUM, description: "Optional max price guardrail." },
+        startAt: { ...NUM, description: "Optional unix-seconds start; omit for immediate." },
+        ...IDEMPOTENCY,
+      },
+      required: ["inputMint", "outputMint", "inAmount", "numberOfOrders", "interval", "idempotencyKey"],
+    },
+  },
+  {
+    name: "jup_recurring_cancel",
+    description: "Cancel a Jupiter recurring (DCA) order by its order account address. Idempotent.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        order: { ...STR, description: "The order account (from jup_recurring_list)." },
+        ...IDEMPOTENCY,
+      },
+      required: ["order", "idempotencyKey"],
+    },
+  },
+  {
+    name: "jup_recurring_list",
+    description: "Read-only: a user's Jupiter recurring (DCA) orders. No idempotency key.",
+    inputSchema: {
+      type: "object" as const,
+      properties: { status: { type: "string" as const, enum: ["active", "history"], description: "Default active." } },
     },
   },
 ];
@@ -1743,6 +1873,81 @@ async function handleHlTwap(deps: ToolDeps, a: Args): Promise<ToolText> {
   return runHlVenue(deps, idempotencyKey, "open", "hl_twap_order", (v) => v.twapOrder({ marketId, side, size, minutes, reduceOnly, randomize }));
 }
 
+// ── Jupiter advanced-surface handlers (limit/trigger + recurring/DCA) ──────────
+// Signer-gated (the Solana "jupiter" signer) + idempotent. Funds escrow to a user-
+// cancellable order account, so none take a recipient.
+
+async function runJupVenue(
+  deps: ToolDeps,
+  idempotencyKey: string,
+  kind: IntentRecord["kind"],
+  label: string,
+  exec: (v: JupVenueOps) => Promise<SubmitResult>,
+): Promise<ToolText> {
+  if (!deps.signerLoaded("jupiter")) return fail("signer_missing", "no solana signer loaded for jupiter; see auth_check");
+  if (!deps.jupVenue) return fail("internal", "the Jupiter venue surface is not wired this run (no solana signer at boot).");
+  const { replayed } = await reserveIntent(deps, idempotencyKey, kind);
+  if (replayed) {
+    return ok({ ok: true, replayed: true, note: `idempotencyKey already used — ${label} was already submitted and is NOT re-sent. Use a NEW key.` });
+  }
+  const res = await exec(deps.jupVenue);
+  await deps.store.patch(deps.botId, idempotencyKey, { state: res.posted ? "FILLED" : "FAILED", txHashes: res.txHashes ?? [] });
+  if (!res.posted) return fail("internal", res.error ?? `${label} rejected`, { submit: res });
+  return ok({ ok: true, replayed: false, label, submit: res });
+}
+
+async function handleJupLimitCreate(deps: ToolDeps, a: Args): Promise<ToolText> {
+  const args = {
+    inputMint: reqStr(a, "inputMint"),
+    outputMint: reqStr(a, "outputMint"),
+    makingAmount: reqStr(a, "makingAmount"),
+    takingAmount: reqStr(a, "takingAmount"),
+    slippageBps: optNum(a, "slippageBps"),
+    expiredAt: optNum(a, "expiredAt"),
+  };
+  return runJupVenue(deps, reqStr(a, "idempotencyKey"), "open", "jup_limit_create", (v) => v.limitCreate(args));
+}
+
+async function handleJupLimitCancel(deps: ToolDeps, a: Args): Promise<ToolText> {
+  const order = reqStr(a, "order");
+  return runJupVenue(deps, reqStr(a, "idempotencyKey"), "cancel", "jup_limit_cancel", (v) => v.limitCancel({ order }));
+}
+
+async function handleJupLimitList(deps: ToolDeps, a: Args): Promise<ToolText> {
+  if (!deps.signerLoaded("jupiter")) return fail("signer_missing", "no solana signer loaded for jupiter; see auth_check");
+  const v = deps.jupVenue;
+  if (!v) return fail("internal", "the Jupiter venue surface is not wired this run (no solana signer at boot).");
+  const status = optEnum(a, "status", ["active", "history"] as const) ?? "active";
+  return ok({ ok: true, status, orders: await v.limitList(status) });
+}
+
+async function handleJupRecurringCreate(deps: ToolDeps, a: Args): Promise<ToolText> {
+  const args = {
+    inputMint: reqStr(a, "inputMint"),
+    outputMint: reqStr(a, "outputMint"),
+    inAmount: reqStr(a, "inAmount"),
+    numberOfOrders: reqNum(a, "numberOfOrders"),
+    interval: reqNum(a, "interval"),
+    minPrice: optNum(a, "minPrice"),
+    maxPrice: optNum(a, "maxPrice"),
+    startAt: optNum(a, "startAt"),
+  };
+  return runJupVenue(deps, reqStr(a, "idempotencyKey"), "open", "jup_recurring_create", (v) => v.recurringCreate(args));
+}
+
+async function handleJupRecurringCancel(deps: ToolDeps, a: Args): Promise<ToolText> {
+  const order = reqStr(a, "order");
+  return runJupVenue(deps, reqStr(a, "idempotencyKey"), "cancel", "jup_recurring_cancel", (v) => v.recurringCancel({ order }));
+}
+
+async function handleJupRecurringList(deps: ToolDeps, a: Args): Promise<ToolText> {
+  if (!deps.signerLoaded("jupiter")) return fail("signer_missing", "no solana signer loaded for jupiter; see auth_check");
+  const v = deps.jupVenue;
+  if (!v) return fail("internal", "the Jupiter venue surface is not wired this run (no solana signer at boot).");
+  const status = optEnum(a, "status", ["active", "history"] as const) ?? "active";
+  return ok({ ok: true, status, orders: await v.recurringList(status) });
+}
+
 // ── retry gate (exposed for the confirm/retry wiring) ────────────────────────
 // Not a tool itself, but the canonical place the retry decision is made so the
 // quota + per-intent caps live next to the builds. server.ts's retry_intent (a
@@ -1842,6 +2047,18 @@ export async function handleMoneyTool(name: string, rawArgs: unknown, deps: Tool
         return await handleHlDelegate(deps, a);
       case "hl_twap":
         return await handleHlTwap(deps, a);
+      case "jup_limit_create":
+        return await handleJupLimitCreate(deps, a);
+      case "jup_limit_cancel":
+        return await handleJupLimitCancel(deps, a);
+      case "jup_limit_list":
+        return await handleJupLimitList(deps, a);
+      case "jup_recurring_create":
+        return await handleJupRecurringCreate(deps, a);
+      case "jup_recurring_cancel":
+        return await handleJupRecurringCancel(deps, a);
+      case "jup_recurring_list":
+        return await handleJupRecurringList(deps, a);
       default:
         return fail("unknown_tool", `unknown tool ${name}`);
     }
