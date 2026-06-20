@@ -17,10 +17,13 @@ import type {
   JupRecurringCancelArgs,
   JupLendEarnArgs,
   JupLendBorrowArgs,
+  JupPredEventsArgs,
+  JupPredOrderArgs,
+  JupPredExitArgs,
 } from "../tools/index.js";
 import { getSolanaSigner } from "../signers/index.js";
-import { JupiterAdapter, toBaseUnits } from "./jupiter.js";
-import { jupGet, jupPost, signAndExecute, signAndBroadcast } from "./jupiter-rest.js";
+import { JupiterAdapter, toBaseUnits, USDC_MINT } from "./jupiter.js";
+import { jupGet, jupPost, jupDelete, signAndExecute, signAndBroadcast } from "./jupiter-rest.js";
 
 const rejected = (error: string): SubmitResult => ({ posted: false, status: "rejected", error });
 
@@ -160,6 +163,46 @@ class JupVenue implements JupVenueOps {
 
   async lendBorrowPositions(): Promise<unknown> {
     return jupGet("/lend/v1/borrow/positions", { users: this.user() });
+  }
+
+  // ── Prediction markets (binary YES/NO) ───────────────────────────────────────
+  // NOTE: Predict is served from api.jup.ag and (per the docs) needs an API key —
+  // set STARLING_JUP_API_KEY so jupHost() targets api.jup.ag. Geo-blocked (US/KR).
+  // Amounts are USD; depositAmount is micro-USD ($5 min). Returns an unsigned tx we
+  // broadcast (txMeta carries lastValidBlockHeight). Sell = DELETE the position.
+
+  async predEvents(a: JupPredEventsArgs): Promise<unknown> {
+    if (a.search) return jupGet("/prediction/v1/events/search", { query: a.search });
+    return jupGet("/prediction/v1/events", { filter: a.filter, category: a.category, includeMarkets: "true" });
+  }
+
+  async predOrder(a: JupPredOrderArgs): Promise<SubmitResult> {
+    const depositMint = a.depositMint ?? USDC_MINT;
+    const depositAmount = String(Math.round(Number(a.usd) * 1e6)); // micro-USD ($5 min)
+    const r = await jupPost<{ transaction?: string; txMeta?: { lastValidBlockHeight?: number }; order?: { orderPubkey?: string; positionPubkey?: string }; error?: string }>(
+      "/prediction/v1/orders",
+      { ownerPubkey: this.user(), marketId: a.marketId, isYes: a.isYes, isBuy: true, depositAmount, depositMint },
+    );
+    if (!r.transaction) return rejected(r.error ?? "prediction order returned no transaction");
+    const res = await signAndBroadcast({ unsignedTxB64: r.transaction, lastValidBlockHeight: r.txMeta?.lastValidBlockHeight });
+    if (res.posted) res.orderId = r.order?.positionPubkey ?? r.order?.orderPubkey; // the position handle (for exit/claim)
+    return res;
+  }
+
+  async predPositions(): Promise<unknown> {
+    return jupGet("/prediction/v1/positions", { ownerPubkey: this.user() });
+  }
+
+  async predExit(a: JupPredExitArgs): Promise<SubmitResult> {
+    const r = await jupDelete<{ transaction?: string; error?: string }>(`/prediction/v1/positions/${a.positionPubkey}`, { ownerPubkey: this.user() });
+    if (!r.transaction) return rejected(r.error ?? "prediction exit returned no transaction");
+    return signAndBroadcast({ unsignedTxB64: r.transaction });
+  }
+
+  async predClaim(a: JupPredExitArgs): Promise<SubmitResult> {
+    const r = await jupPost<{ transaction?: string; error?: string }>(`/prediction/v1/positions/${a.positionPubkey}/claim`, { ownerPubkey: this.user() });
+    if (!r.transaction) return rejected(r.error ?? "prediction claim returned no transaction");
+    return signAndBroadcast({ unsignedTxB64: r.transaction });
   }
 }
 

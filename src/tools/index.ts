@@ -320,6 +320,12 @@ export interface JupLendEarnArgs { asset: string; amount: string }
  *  RAW-unit strings (+col supply / -col withdraw; +debt borrow / -debt repay).
  *  positionId 0 opens a new position. */
 export interface JupLendBorrowArgs { vaultId: number; positionId: number; colAmount: string; debtAmount: string }
+/** Jupiter Prediction: list/search binary markets. */
+export interface JupPredEventsArgs { filter?: string; category?: string; search?: string }
+/** Jupiter Prediction: buy YES (isYes:true) or NO shares with `usd` (>= $5). */
+export interface JupPredOrderArgs { marketId: string; isYes: boolean; usd: string; depositMint?: string }
+/** Jupiter Prediction: a position handle for exit/claim. */
+export interface JupPredExitArgs { positionPubkey: string }
 
 /**
  * The Jupiter advanced surface as an injectable ops object (mirrors HlVenueOps). Each
@@ -341,6 +347,11 @@ export interface JupVenueOps {
   lendBorrow(a: JupLendBorrowArgs): Promise<SubmitResult>;
   lendVaults(): Promise<unknown>;
   lendBorrowPositions(): Promise<unknown>;
+  predEvents(a: JupPredEventsArgs): Promise<unknown>;
+  predOrder(a: JupPredOrderArgs): Promise<SubmitResult>;
+  predPositions(): Promise<unknown>;
+  predExit(a: JupPredExitArgs): Promise<SubmitResult>;
+  predClaim(a: JupPredExitArgs): Promise<SubmitResult>;
 }
 
 /**
@@ -1009,6 +1020,67 @@ export const MONEY_TOOLS = [
     name: "jup_lend_positions",
     description: "Read-only: a user's Jupiter Lend positions — EARN balances + BORROW positions. No idempotency key.",
     inputSchema: { type: "object" as const, properties: {} },
+  },
+  {
+    name: "jup_pred_markets",
+    description:
+      "Read-only: list/search Jupiter PREDICTION markets (binary YES/NO real-world events) with YES/NO " +
+      "prices. Filter by `filter` (new|live|trending|upcoming), `category`, or `search`. No idempotency key. " +
+      "NOTE: Predict needs STARLING_JUP_API_KEY (api.jup.ag) and is geo-blocked in US/KR.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        filter: { ...STR, description: "new | live | trending | upcoming." },
+        category: { ...STR, description: "e.g. Sports, Crypto, Politics." },
+        search: { ...STR, description: "Free-text market search (overrides filter/category)." },
+      },
+    },
+  },
+  {
+    name: "jup_pred_buy",
+    description:
+      "Buy YES (isYes:true) or NO (isYes:false) shares in a Jupiter prediction market with `usd` (min $5). " +
+      "Signs locally + broadcasts. Returns the position handle (for jup_pred_exit / jup_pred_claim). Idempotent.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        marketId: { ...STR, description: "Market id from jup_pred_markets." },
+        isYes: { ...BOOL, description: "true = buy YES, false = buy NO." },
+        usd: { ...STR, description: "Decimal USD to spend (>= 5)." },
+        depositMint: { ...STR, description: "Optional collateral mint; default USDC." },
+        ...IDEMPOTENCY,
+      },
+      required: ["marketId", "isYes", "usd", "idempotencyKey"],
+    },
+  },
+  {
+    name: "jup_pred_positions",
+    description: "Read-only: a user's Jupiter prediction positions (value, PnL, claimable). No idempotency key.",
+    inputSchema: { type: "object" as const, properties: {} },
+  },
+  {
+    name: "jup_pred_exit",
+    description: "Sell/exit a Jupiter prediction position before resolution, by position pubkey. Idempotent.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        positionPubkey: { ...STR, description: "From jup_pred_buy / jup_pred_positions." },
+        ...IDEMPOTENCY,
+      },
+      required: ["positionPubkey", "idempotencyKey"],
+    },
+  },
+  {
+    name: "jup_pred_claim",
+    description: "Claim the payout of a RESOLVED winning Jupiter prediction position, by position pubkey. Idempotent.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        positionPubkey: STR,
+        ...IDEMPOTENCY,
+      },
+      required: ["positionPubkey", "idempotencyKey"],
+    },
   },
 ];
 
@@ -2054,6 +2126,36 @@ async function handleJupLendPositions(deps: ToolDeps): Promise<ToolText> {
   return ok({ ok: true, earn, borrow });
 }
 
+async function handleJupPredMarkets(deps: ToolDeps, a: Args): Promise<ToolText> {
+  if (!deps.signerLoaded("jupiter")) return fail("signer_missing", "no solana signer loaded for jupiter; see auth_check");
+  const v = deps.jupVenue;
+  if (!v) return fail("internal", "the Jupiter venue surface is not wired this run (no solana signer at boot).");
+  const events = await v.predEvents({ filter: optStr(a, "filter"), category: optStr(a, "category"), search: optStr(a, "search") });
+  return ok({ ok: true, events });
+}
+
+async function handleJupPredBuy(deps: ToolDeps, a: Args): Promise<ToolText> {
+  const args = { marketId: reqStr(a, "marketId"), isYes: reqBool(a, "isYes"), usd: reqStr(a, "usd"), depositMint: optStr(a, "depositMint") };
+  return runJupVenue(deps, reqStr(a, "idempotencyKey"), "open", "jup_pred_buy", (v) => v.predOrder(args));
+}
+
+async function handleJupPredPositions(deps: ToolDeps): Promise<ToolText> {
+  if (!deps.signerLoaded("jupiter")) return fail("signer_missing", "no solana signer loaded for jupiter; see auth_check");
+  const v = deps.jupVenue;
+  if (!v) return fail("internal", "the Jupiter venue surface is not wired this run (no solana signer at boot).");
+  return ok({ ok: true, positions: await v.predPositions() });
+}
+
+async function handleJupPredExit(deps: ToolDeps, a: Args): Promise<ToolText> {
+  const positionPubkey = reqStr(a, "positionPubkey");
+  return runJupVenue(deps, reqStr(a, "idempotencyKey"), "close", "jup_pred_exit", (v) => v.predExit({ positionPubkey }));
+}
+
+async function handleJupPredClaim(deps: ToolDeps, a: Args): Promise<ToolText> {
+  const positionPubkey = reqStr(a, "positionPubkey");
+  return runJupVenue(deps, reqStr(a, "idempotencyKey"), "redeem", "jup_pred_claim", (v) => v.predClaim({ positionPubkey }));
+}
+
 // ── retry gate (exposed for the confirm/retry wiring) ────────────────────────
 // Not a tool itself, but the canonical place the retry decision is made so the
 // quota + per-intent caps live next to the builds. server.ts's retry_intent (a
@@ -2175,6 +2277,16 @@ export async function handleMoneyTool(name: string, rawArgs: unknown, deps: Tool
         return await handleJupLendMarkets(deps);
       case "jup_lend_positions":
         return await handleJupLendPositions(deps);
+      case "jup_pred_markets":
+        return await handleJupPredMarkets(deps, a);
+      case "jup_pred_buy":
+        return await handleJupPredBuy(deps, a);
+      case "jup_pred_positions":
+        return await handleJupPredPositions(deps);
+      case "jup_pred_exit":
+        return await handleJupPredExit(deps, a);
+      case "jup_pred_claim":
+        return await handleJupPredClaim(deps, a);
       default:
         return fail("unknown_tool", `unknown tool ${name}`);
     }

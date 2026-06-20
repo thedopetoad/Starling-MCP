@@ -32,6 +32,11 @@ function recordingJup() {
     async lendBorrow(a) { calls.push(["lendBorrow", a]); return { posted: true, status: "filled", orderId: "9029", txHashes: ["sigb"] }; },
     async lendVaults() { calls.push(["lendVaults", null]); return { vaults: [] }; },
     async lendBorrowPositions() { calls.push(["lendBorrowPositions", null]); return { positions: [] }; },
+    async predEvents(a) { calls.push(["predEvents", a]); return { events: [] }; },
+    async predOrder(a) { calls.push(["predOrder", a]); return { posted: true, status: "filled", orderId: "POS1", txHashes: ["sigp"] }; },
+    async predPositions() { calls.push(["predPositions", null]); return { positions: [] }; },
+    async predExit(a) { calls.push(["predExit", a]); return { posted: true, status: "filled", txHashes: ["sige"] }; },
+    async predClaim(a) { calls.push(["predClaim", a]); return { posted: true, status: "filled", txHashes: ["sigc"] }; },
   };
   return { ops, calls };
 }
@@ -124,4 +129,20 @@ test("jup_lend deposit/borrow execute + idempotent; markets/positions read both 
   const pos = await parse(handleMoneyTool("jup_lend_positions", {}, deps));
   assert.equal(pos.ok, true);
   assert.deepEqual(calls.slice(2).map((c) => c[0]), ["lendTokens", "lendVaults", "lendPositions", "lendBorrowPositions"]);
+});
+
+test("jup_pred buy/exit/claim execute + markets/positions read", async () => {
+  const { ops, calls } = recordingJup();
+  const deps = depsWith(ops);
+  const buy = await parse(handleMoneyTool("jup_pred_buy", { idempotencyKey: "p1", marketId: "MKT1", isYes: true, usd: "5" }, deps));
+  assert.equal(buy.ok, true);
+  assert.equal(buy.submit.orderId, "POS1");
+  assert.deepEqual(calls[0], ["predOrder", { marketId: "MKT1", isYes: true, usd: "5", depositMint: undefined }]);
+  await parse(handleMoneyTool("jup_pred_exit", { idempotencyKey: "pe1", positionPubkey: "POS1" }, deps));
+  await parse(handleMoneyTool("jup_pred_claim", { idempotencyKey: "pc1", positionPubkey: "POS1" }, deps));
+  const mk = await parse(handleMoneyTool("jup_pred_markets", { filter: "trending" }, deps));
+  assert.equal(mk.ok, true);
+  const pos = await parse(handleMoneyTool("jup_pred_positions", {}, deps));
+  assert.equal(pos.ok, true);
+  assert.deepEqual(calls.map((c) => c[0]), ["predOrder", "predExit", "predClaim", "predEvents", "predPositions"]);
 });
