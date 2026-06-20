@@ -11,11 +11,15 @@ import {
   toBaseUnits,
   decimalsOf,
   stripJupPrefix,
+  parseJupPair,
 } from "./jupiter.js";
 
 process.env.STARLING_KEY_SOURCE = "env";
 process.env.STARLING_PK_SOLANA = "0101010101010101010101010101010101010101010101010101010101010101"; // 32-byte seed (hex)
 await bootUnlock();
+
+const BONK_MINT = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"; // 5 decimals
+const fakeRpc = { async getTokenSupply() { return { amount: "0", decimals: 5 }; } };
 
 test("toBaseUnits converts decimals without float drift", () => {
   assert.equal(toBaseUnits("0.01", 9), "10000000");
@@ -60,6 +64,12 @@ function router(state: any): typeof fetch {
         status: 200,
         json: async () => ({ swapTransaction: "AQAB-base64-placeholder", lastValidBlockHeight: 4242 }),
       } as unknown as Response;
+    }
+    if (u.includes("/tokens/v2/search")) {
+      const q = new URL(u).searchParams.get("query");
+      state.lastTokenQuery = q;
+      const TOKENS: Record<string, unknown> = { [BONK_MINT]: { id: BONK_MINT, name: "Bonk", symbol: "Bonk", decimals: 5 } };
+      return { ok: true, status: 200, json: async () => (TOKENS[q!] ? [TOKENS[q!]] : []) } as unknown as Response;
     }
     throw new Error(`unexpected url ${u}`);
   }) as unknown as typeof fetch;
@@ -140,4 +150,73 @@ test("buildOpen SELL maps target->SOL, sizes in the token's base units", async (
   assert.equal(q.searchParams.get("inputMint"), USDC_MINT);
   assert.equal(q.searchParams.get("outputMint"), SOL_MINT);
   assert.equal(q.searchParams.get("amount"), "1500000"); // 1.5 USDC @ 6dp
+});
+
+test("parseJupPair: single mint = SOL quote; two mints = explicit; rejects junk", () => {
+  assert.deepEqual(parseJupPair(`jup:${USDC_MINT}`), { quoteMint: SOL_MINT, assetMint: USDC_MINT });
+  assert.deepEqual(parseJupPair(`jup:${USDC_MINT}:${BONK_MINT}`), { quoteMint: USDC_MINT, assetMint: BONK_MINT });
+  assert.deepEqual(parseJupPair(`${USDC_MINT}/${BONK_MINT}`), { quoteMint: USDC_MINT, assetMint: BONK_MINT });
+  assert.throws(() => parseJupPair("jup:not-a-mint"));
+  assert.throws(() => parseJupPair(`jup:${USDC_MINT}:${BONK_MINT}:${SOL_MINT}`));
+});
+
+test("resolveTokenMeta: known mints resolve instantly with no network", async () => {
+  const a = new JupiterAdapter({ fetchImpl: (() => { throw new Error("must not fetch for known mints"); }) as unknown as typeof fetch });
+  assert.deepEqual(await a.resolveTokenMeta(SOL_MINT), { decimals: 9, symbol: "SOL" });
+  assert.deepEqual(await a.resolveTokenMeta(USDC_MINT), { decimals: 6, symbol: "USDC" });
+});
+
+test("resolveTokenMeta: arbitrary mint via the Jupiter token API, then cached", async () => {
+  const state: Record<string, unknown> = {};
+  const a = new JupiterAdapter({ fetchImpl: router(state) });
+  assert.deepEqual(await a.resolveTokenMeta(BONK_MINT), { decimals: 5, symbol: "Bonk" });
+  assert.equal(state.lastTokenQuery, BONK_MINT);
+  state.lastTokenQuery = null; // a cached second lookup must NOT re-query
+  await a.resolveTokenMeta(BONK_MINT);
+  assert.equal(state.lastTokenQuery, null);
+});
+
+test("resolveTokenMeta: falls back to on-chain getTokenSupply when the token API misses", async () => {
+  const UNLISTED = "So11111111111111111111111111111111111111113"; // valid base58, not in the fake index
+  const a = new JupiterAdapter({ fetchImpl: router({}), rpc: fakeRpc });
+  assert.deepEqual(await a.resolveTokenMeta(UNLISTED), { decimals: 5, symbol: UNLISTED.slice(0, 4) });
+});
+
+test("buildOpen arbitrary pair: jup:USDC:BONK buy spends USDC at USDC decimals", async () => {
+  const state: Record<string, unknown> = {};
+  const a = new JupiterAdapter({ fetchImpl: router(state) });
+  const build = await a.buildOpen({
+    venue: "jupiter",
+    marketId: `jup:${USDC_MINT}:${BONK_MINT}`,
+    side: "buy",
+    amount: "10",
+    amountKind: "collateral",
+    worstPrice: "0",
+    slippageFrac: 0.01,
+    idempotencyKey: "kp",
+  });
+  assert.equal(build.kind, "solanaTx");
+  const q = new URL(state.lastQuoteUrl as string);
+  assert.equal(q.searchParams.get("inputMint"), USDC_MINT);
+  assert.equal(q.searchParams.get("outputMint"), BONK_MINT);
+  assert.equal(q.searchParams.get("amount"), "10000000"); // 10 USDC @ 6dp
+  assert.equal(q.searchParams.get("slippageBps"), "100"); // 1%
+});
+
+test("buildOpen arbitrary pair: jup:USDC:BONK sell spends BONK at BONK decimals", async () => {
+  const state: Record<string, unknown> = {};
+  const a = new JupiterAdapter({ fetchImpl: router(state) });
+  await a.buildOpen({
+    venue: "jupiter",
+    marketId: `jup:${USDC_MINT}:${BONK_MINT}`,
+    side: "sell",
+    amount: "100",
+    amountKind: "shares",
+    worstPrice: "0",
+    idempotencyKey: "kps",
+  });
+  const q = new URL(state.lastQuoteUrl as string);
+  assert.equal(q.searchParams.get("inputMint"), BONK_MINT);
+  assert.equal(q.searchParams.get("outputMint"), USDC_MINT);
+  assert.equal(q.searchParams.get("amount"), "10000000"); // 100 BONK @ 5dp
 });

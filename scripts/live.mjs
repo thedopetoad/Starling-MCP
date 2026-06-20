@@ -125,6 +125,35 @@ async function swap() {
   if (res.txid) console.log("https://solscan.io/tx/" + res.txid);
 }
 
+// ── Generic Jupiter swap: ANY pair, ANY side (proves arbitrary-token trading) ──
+// usage: jup <marketId> <buy|sell> <amount> [--live]
+//   marketId "jup:<assetMint>" (SOL quote) or "jup:<quoteMint>:<assetMint>". The
+//   symbol shortcuts SOL/USDC/BONK expand to mints for convenience, e.g.
+//   `jup jup:USDC:BONK buy 0.5` spends 0.5 USDC for BONK.
+const JUP_SYMS = { SOL: SOL_MINT, USDC: USDC_MINT, BONK: "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263" };
+function expandMarketId(m) {
+  return m.split(/([:/])/).map((p) => JUP_SYMS[p.toUpperCase()] ?? p).join("");
+}
+async function jup() {
+  if (!arg) throw new Error("usage: jup <marketId> <buy|sell> <amount> [--live]  e.g. jup jup:USDC:BONK buy 0.5");
+  const marketId = expandMarketId(arg);
+  const side = (arg2 || "buy").toLowerCase();
+  const amount = arg3 || "0.5";
+  const rm = await jupiterAdapter.resolveMarket(marketId);
+  console.log(`jup ${side} ${amount} on ${arg} -> ${marketId}`);
+  console.log("  resolve:", JSON.stringify(rm.meta));
+  const intent = { venue: "jupiter", marketId, side, amount, amountKind: side === "buy" ? "collateral" : "shares", worstPrice: "0", slippageFrac: 0.02, idempotencyKey: `jup-${Date.now()}` };
+  const build = await jupiterAdapter.buildOpen(intent);
+  const sim = await solRpc.simulate(build.unsignedTxB64).catch((e) => ({ err: `sim fetch: ${e.message}` }));
+  console.log("  simulate:", sim.err ? `ERR ${JSON.stringify(sim.err)}` : "OK (executable)");
+  if (!LIVE) return void console.log("DRY — --live to send.");
+  if (sim.err) return void console.log("refusing to broadcast: sim failed.");
+  console.log("\n>>> BROADCASTING JUP SWAP LIVE <<<");
+  const res = await signAndSend(build, getSolanaSigner(), solRpc, { simulateFirst: true });
+  console.log("  result:", { ok: res.ok, status: res.status, txid: res.txid });
+  if (res.txid) console.log("  https://solscan.io/tx/" + res.txid);
+}
+
 // ── deBridge param builders (Solana source; authorities pinned to our wallets) ──
 function fundingParams(toChain, recipient, usdcDecimal) {
   return {
@@ -648,6 +677,6 @@ async function pmBridgeWithdraw() {
   }
 }
 
-const stages = { balances, swap, bridge, "hl-deposit": hlDeposit, "hl-trade": hlTrade, "hl-close": hlClose, "hl-withdraw": hlWithdraw, "pm-creds": pmCreds, "pm-enable": pmEnable, "enable-dw": enableDw, "poly-swap": polySwap, "pm-trade": pmTrade, "pm-bridge-withdraw": pmBridgeWithdraw, route, cctp, transfer };
+const stages = { balances, swap, jup, bridge, "hl-deposit": hlDeposit, "hl-trade": hlTrade, "hl-close": hlClose, "hl-withdraw": hlWithdraw, "pm-creds": pmCreds, "pm-enable": pmEnable, "enable-dw": enableDw, "poly-swap": polySwap, "pm-trade": pmTrade, "pm-bridge-withdraw": pmBridgeWithdraw, route, cctp, transfer };
 if (!stages[stage]) { console.log("stages:", Object.keys(stages).join(", ")); process.exit(1); }
 await stages[stage]();

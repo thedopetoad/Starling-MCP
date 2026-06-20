@@ -93,9 +93,13 @@ open_position checks the caps BEFORE building, so a blocked trade never signs.
   actions (no gas, no approvals), plus the native withdraw3 off-ramp to Arbitrum.
   enable_venue just says fund the L1. Set 'STARLING_NETWORK=mainnet' for real
   funds (defaults to testnet).
-- **Solana / Jupiter** (spot swap) — FULLY LIVE: keyless Jupiter Swap API, v0 tx
-  signed locally with the ed25519 key, broadcast + confirmed via the Solana RPC.
-  marketId is 'jup:<mint>'; buy spends SOL for the mint, sell returns it.
+- **Solana / Jupiter** (spot swap) — FULLY LIVE: keyless Jupiter Swap API (lite-api,
+  no API key to leak, ZERO platform fee), v0 tx signed locally with the ed25519 key,
+  broadcast + confirmed via the Solana RPC. Trades ANY SPL token, ANY pair: marketId is
+  'jup:<assetMint>' (SOL is the quote) OR 'jup:<quoteMint>:<assetMint>' to pick the quote
+  currency (e.g. 'jup:<USDC>:<BONK>'). buy spends the quote to acquire the asset; sell
+  returns the asset to the quote. Token decimals auto-resolve (Jupiter token API ->
+  on-chain getTokenSupply); get_quote returns the live price (quotePerAsset).
 - **Polymarket** (prediction markets, Polygon) — LIVE end to end: open_position /
   close_position build + locally sign a V2 DEPOSIT-WALLET order (signatureType 3,
   ERC-7739) whose maker is the EOA's derived deposit wallet, then POST it. A real

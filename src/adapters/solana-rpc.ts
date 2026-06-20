@@ -66,6 +66,16 @@ export class SolanaRpc {
     return { amount: acct.amount, decimals: acct.decimals, uiAmount: acct.uiAmount };
   }
 
+  /** Mint decimals (+ total supply) for ANY mint — on-chain truth, works even when
+   *  the wallet holds none of it. The universal fallback for token-decimals lookup. */
+  async getTokenSupply(mint: string): Promise<{ amount: string; decimals: number }> {
+    const r = await this.call<{ value: { amount: string; decimals: number } }>("getTokenSupply", [
+      mint,
+      { commitment: "confirmed" },
+    ]);
+    return r.value;
+  }
+
   async getLatestBlockhash(commitment = "confirmed"): Promise<LatestBlockhash> {
     const r = await this.call<{ value: LatestBlockhash }>("getLatestBlockhash", [{ commitment }]);
     return r.value;
