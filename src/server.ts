@@ -48,6 +48,13 @@ import {
   makeIntentStore,
   makeReconciler,
 } from "./tools/deps.js";
+import {
+  writeStatus,
+  drainControl,
+  haltActive,
+  haltInfo,
+  isHaltBlocked,
+} from "./control/plane.js";
 
 const log = (m: string) => process.stderr.write(`[starling] ${m}\n`);
 const text = (obj: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(obj, null, 2) }] });
@@ -289,6 +296,26 @@ export async function startServer(): Promise<void> {
 
     // Money-moving + venue tools live in the registry (own schemas + handlers).
     if (MONEY_TOOL_NAMES.has(name)) {
+      // Dashboard kill switch: while ~/.starling/trading.halt exists, refuse the
+      // trade-ENTRY tools (open/increase exposure). Closes, cancels, withdraws,
+      // bridges-home and reads still pass — so the user can still get flat / get
+      // funds out while halted. See control/plane.ts HALT_BLOCKED_TOOLS.
+      if (isHaltBlocked(name)) {
+        log(`halted: refused ${name} (trading.halt present)`);
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({
+              ok: false,
+              error: "halted",
+              message: "Trading is halted by the dashboard kill switch. Clear it (Resume) to trade again.",
+              haltReason: haltInfo()?.reason ?? "manual",
+              tool: name,
+            }, null, 2),
+          }],
+          isError: true,
+        };
+      }
       return handleMoneyTool(name, req.params.arguments, deps);
     }
 
@@ -374,5 +401,49 @@ export async function startServer(): Promise<void> {
 
   await server.connect(new StdioServerTransport());
   log("MCP server connected on stdio");
+
+  // Control plane for the Starling dashboard: publish a heartbeat to
+  // ~/.starling/status.json and drain dashboard commands, on a timer. The dashboard
+  // reads this to show the LIVE agent (it can't share our stdio pipe). The halt
+  // gate itself is enforced in the request handler above; here we only publish
+  // state + obey halt/resume + ack commands. unref() so this timer never keeps the
+  // process alive on its own.
+  const controlTick = async () => {
+    try {
+      await writeStatus(statusSnapshot());
+    } catch (e) {
+      log(`status publish failed: ${(e as Error).message}`);
+    }
+    try {
+      await drainControl();
+    } catch (e) {
+      log(`control drain failed: ${(e as Error).message}`);
+    }
+  };
+  await controlTick();
+  setInterval(() => void controlTick(), 1500).unref();
   // Do NOT exit on stdin EOF — supervised restarts must not be tripped by it.
+}
+
+// The cheap, no-I/O snapshot the dashboard renders (network / key source / per-venue
+// signer + address / trading state). Mirrors what auth_check reports, minus the
+// RPC-backed gas reserve so it's safe to run every ~1.5s. tradingEnabled folds in
+// both the env kill switch and the dashboard halt flag.
+function statusSnapshot() {
+  const addrs = loadedAddresses();
+  const envKill = (process.env.STARLING_KILL_SWITCH ?? "").toLowerCase() === "true";
+  const halted = envKill || haltActive();
+  const chains = ["polygon", "hyperliquid", "solana"] as const;
+  return {
+    version: 1,
+    ts: new Date().toISOString(),
+    pid: process.pid,
+    network: process.env.STARLING_NETWORK ?? "testnet",
+    keySource: activeKeySource(),
+    tradingEnabled: !halted,
+    haltReason: haltActive() ? (haltInfo()?.reason ?? "manual") : envKill ? "kill_switch_env" : null,
+    venues: Object.fromEntries(
+      chains.map((c) => [c, { signerLoaded: !!addrs[c], address: addrs[c] ?? null }]),
+    ),
+  };
 }
