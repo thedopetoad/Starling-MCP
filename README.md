@@ -135,6 +135,9 @@ relevant signer loaded):
 | *"What's the best price for $50 of YES on \<market\>?"* | `get_quote` | reads venue metadata + price so the caller can derive a worst-price (read-only) |
 | *"Buy $50 YES on \<market\> under 40c."* | `open_position` | builds an EIP-712 CLOB order (PM) / signed action (HL) / Solana tx (Jupiter), signs locally, submits |
 | *"Close half my BTC perp at no worse than 60k."* | `close_position` | builds + signs the exit for a fraction (0,1] with an explicit worst price, then submits |
+| *"Rest a limit at 58k / set a stop-loss / buy spot HYPE."* | `hl_order` | advanced Hyperliquid order — perp `hl:<COIN>` or spot `hlspot:<TOKEN>`: tif Gtc/Alo/Ioc, reduceOnly, trigger (tp/sl), cloid |
+| *"Cancel my open ETH orders."* | `hl_cancel` | cancel a Hyperliquid order by oid / cloid / all-on-market |
+| *"Set 5x on BTC, stake HYPE, deposit to HLP, run a TWAP."* | `hl_update_leverage` · `hl_stake` · `hl_delegate` · `hl_vault_transfer` · `hl_usd_class_transfer` · `hl_update_isolated_margin` · `hl_twap` | the full HyperCore surface — leverage, staking+delegation, vault yield, perp↔spot, isolated margin, TWAP. Read it all with `hl_account` |
 | *"What do I hold and what's my PnL?"* | `list_positions` | normalized open positions across venues (pass `marketIds` to read specific ones) |
 | *"Get this fresh wallet ready to trade Polymarket."* | `enable_venue` | builds the UNSIGNED on-chain setup a fresh EOA needs (PM approvals + pUSD wrap + deposit-wallet registry; HL deposit; Jupiter ATA) + a `blockers[]` to poll |
 | *"What's the fee/ETA to bridge $100 USDC to Solana?"* | `bridge_quote` | fee/ETA/finality for a USDC (CCTP) or non-USDC (deBridge) route (read-only) |
@@ -277,9 +280,12 @@ In short: the read-only trust-layer tools (`get_instructions`, `auth_check`,
 without moving funds; the money-moving + venue tools (`get_quote`,
 `open_position`, `close_position`, `list_positions`, `enable_venue`,
 `bridge_quote`, `build_bridge`, `transfer`, `ensure_gas`, `plan_funding_route`,
-`get_bridge_status`, `advance_bridge`, `build_withdraw` — across Polymarket /
-Hyperliquid / Solana) build on the same `getEvmSigner()` / `getSolanaSigner()`
-contract. Each activates once its venue's signer (and bridge RPCs) are loaded.
+`get_bridge_status`, `advance_bridge`, `build_withdraw`, the native-bridge tools
+(`pm_deposit_address`, `pm_withdraw`, `hl_bridge_out`), and the full Hyperliquid
+surface (`hl_account`, `hl_order`, `hl_cancel`, `hl_update_leverage`,
+`hl_update_isolated_margin`, `hl_usd_class_transfer`, `hl_vault_transfer`,
+`hl_stake`, `hl_delegate`, `hl_twap`) — across Polymarket / Hyperliquid / Solana)
+build on the same `getEvmSigner()` / `getSolanaSigner()` contract. Each activates once its venue's signer (and bridge RPCs) are loaded.
 Ask your agent to *list its tools* to see exactly what's exposed right now.
 
 Watch it live with the [Starling Agent Dashboard](https://github.com/thedopetoad/Starling-Agent-Dashboard).

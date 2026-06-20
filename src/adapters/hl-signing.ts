@@ -250,6 +250,114 @@ export function signSpotSend(args: {
   };
 }
 
+// ── tokenDelegate (stake/unstake HYPE to a validator) ───────────────────────
+// User-signed. Types VERBATIM from the python SDK's TOKEN_DELEGATE_TYPES —
+// note `wei` comes BEFORE `isUndelegate` (the docs DISPLAY them the other way,
+// but the SDK type-list order is what the EIP-712 hash uses). wei is in the
+// token's native wei units (HYPE = 1e8 wei). isUndelegate=true undelegates.
+const TOKEN_DELEGATE_TYPES = {
+  "HyperliquidTransaction:TokenDelegate": [
+    { name: "hyperliquidChain", type: "string" },
+    { name: "validator", type: "address" },
+    { name: "wei", type: "uint64" },
+    { name: "isUndelegate", type: "bool" },
+    { name: "nonce", type: "uint64" },
+  ],
+} as const;
+
+export interface HlTokenDelegateAction {
+  type: "tokenDelegate";
+  hyperliquidChain: "Mainnet" | "Testnet";
+  signatureChainId: `0x${string}`;
+  validator: string;
+  wei: number;
+  isUndelegate: boolean;
+  nonce: number;
+}
+
+export function signTokenDelegate(args: {
+  signer: EvmSigner;
+  validator: string;
+  /** HYPE in native wei (1 HYPE = 1e8). Integer. */
+  wei: number;
+  isUndelegate: boolean;
+  nonce: number;
+  isMainnet: boolean;
+}): { action: HlTokenDelegateAction; signature: RsvSignature; nonce: number } {
+  const validator = args.validator.toLowerCase() as `0x${string}`;
+  const signatureChainId: `0x${string}` = args.isMainnet ? "0xa4b1" : "0x66eee";
+  const chainId = args.isMainnet ? 42161 : 421614;
+  const hyperliquidChain = args.isMainnet ? "Mainnet" : "Testnet";
+  const digest = hashTypedData({
+    domain: { name: "HyperliquidSignTransaction", version: "1", chainId, verifyingContract: "0x0000000000000000000000000000000000000000" },
+    types: TOKEN_DELEGATE_TYPES,
+    primaryType: "HyperliquidTransaction:TokenDelegate",
+    message: { hyperliquidChain, validator, wei: BigInt(args.wei), isUndelegate: args.isUndelegate, nonce: BigInt(args.nonce) },
+  });
+  const rsv = args.signer.signDigest(hexToBytes(digest));
+  return {
+    action: { type: "tokenDelegate", hyperliquidChain, signatureChainId, validator, wei: args.wei, isUndelegate: args.isUndelegate, nonce: args.nonce },
+    signature: { r: `0x${toHex(rsv.subarray(0, 32))}`, s: `0x${toHex(rsv.subarray(32, 64))}`, v: rsv[64] },
+    nonce: args.nonce,
+  };
+}
+
+// ── cDeposit / cWithdraw (move HYPE between spot balance and the staking balance) ─
+// User-signed. NOT in the pinned python SDK version — types inferred from the HL
+// docs (action JSON {type, hyperliquidChain, signatureChainId, wei, nonce}; the
+// user-signed type list = those fields minus type+signatureChainId, in order).
+// LIVE-VERIFIED rather than SDK-vector-locked: a wrong type list yields a signature
+// rejection (no funds move), so the live test confirms correctness. wei = HYPE * 1e8.
+const C_STAKE_TYPES = (primary: "CDeposit" | "CWithdraw") =>
+  ({
+    [`HyperliquidTransaction:${primary}`]: [
+      { name: "hyperliquidChain", type: "string" },
+      { name: "wei", type: "uint64" },
+      { name: "nonce", type: "uint64" },
+    ],
+  }) as const;
+
+export interface HlCStakeAction {
+  type: "cDeposit" | "cWithdraw";
+  hyperliquidChain: "Mainnet" | "Testnet";
+  signatureChainId: `0x${string}`;
+  wei: number;
+  nonce: number;
+}
+
+function signCStake(kind: "cDeposit" | "cWithdraw", args: {
+  signer: EvmSigner;
+  wei: number;
+  nonce: number;
+  isMainnet: boolean;
+}): { action: HlCStakeAction; signature: RsvSignature; nonce: number } {
+  const primary = kind === "cDeposit" ? "CDeposit" : "CWithdraw";
+  const signatureChainId: `0x${string}` = args.isMainnet ? "0xa4b1" : "0x66eee";
+  const chainId = args.isMainnet ? 42161 : 421614;
+  const hyperliquidChain = args.isMainnet ? "Mainnet" : "Testnet";
+  const digest = hashTypedData({
+    domain: { name: "HyperliquidSignTransaction", version: "1", chainId, verifyingContract: "0x0000000000000000000000000000000000000000" },
+    types: C_STAKE_TYPES(primary),
+    primaryType: `HyperliquidTransaction:${primary}`,
+    message: { hyperliquidChain, wei: BigInt(args.wei), nonce: BigInt(args.nonce) },
+  });
+  const rsv = args.signer.signDigest(hexToBytes(digest));
+  return {
+    action: { type: kind, hyperliquidChain, signatureChainId, wei: args.wei, nonce: args.nonce },
+    signature: { r: `0x${toHex(rsv.subarray(0, 32))}`, s: `0x${toHex(rsv.subarray(32, 64))}`, v: rsv[64] },
+    nonce: args.nonce,
+  };
+}
+
+/** Move HYPE from the spot balance INTO the staking balance. wei = HYPE * 1e8. */
+export function signCDeposit(args: { signer: EvmSigner; wei: number; nonce: number; isMainnet: boolean }) {
+  return signCStake("cDeposit", args);
+}
+/** Move HYPE from the staking balance back to spot (enters the 7-day unbonding queue). */
+export function signCWithdraw(args: { signer: EvmSigner; wei: number; nonce: number; isMainnet: boolean }) {
+  return signCStake("cWithdraw", args);
+}
+
 /**
  * The HyperCore->HyperEVM SYSTEM ADDRESS for a spot token: first byte 0x20, the
  * remaining 19 bytes are the token index big-endian (zeros for the low ones). USDC

@@ -5,19 +5,24 @@
 // msgpack-hashed L1 actions, not EVM txs, and settle on the L1 (no tx hashes).
 //
 // Trading model (decided):
-//   - Perps. marketId is "hl:<COIN>" (e.g. "hl:BTC"); the COIN resolves to an
-//     asset INDEX in the meta universe, which is what the order references (NEVER
-//     the ticker — re-resolved per build so a re-listed index can't go stale).
-//   - IOC (immediate-or-cancel) limit orders bounded by worstPrice. This is the
-//     no-resting analogue of PM's FAK: marketable up to the price limit, remainder
-//     cancelled. There is NO market order in this stack.
+//   - PERPS: marketId is "hl:<COIN>" (e.g. "hl:BTC"); the COIN resolves to an asset
+//     INDEX in the perp meta universe, which is what the order references.
+//   - SPOT: marketId is "hlspot:<TOKEN>" (e.g. "hlspot:HYPE"), "hlspot:<BASE>/USDC",
+//     or "hlspot:@<pairIndex>". The base token resolves through spotMeta to its USDC
+//     pair; the order's asset INDEX is 10000 + the spot pair index (HL's spot asset
+//     convention). szDecimals come from the TOKEN; the "position" is the token balance.
+//   In both cases the index is RE-RESOLVED per build so a re-listed index can't go stale.
+//   - IOC (immediate-or-cancel) limit orders bounded by worstPrice for buildOpen/
+//     buildClose. This is the no-resting analogue of PM's FAK. Resting (Gtc/Alo),
+//     trigger (tp/sl), TWAP, cancels, leverage, vaults and staking live in hl-venue.ts
+//     (the HL-specific tool surface) — this adapter stays the generic open/close path.
 //   - AMOUNT-KIND: "collateral" => USD notional (size = usd / price); "shares" =>
 //     base-asset size directly. Either way the size is floored to szDecimals so a
 //     BUY never deploys more than the budget and a close never exceeds the position.
 //
 // WORST-PRICE INVARIANT: worstPrice is required and becomes the IOC limit price,
-// rounded onto HL's price grid (≤5 significant figures AND ≤ (6 - szDecimals)
-// decimals for perps; integer prices are always valid).
+// rounded onto HL's price grid (<=5 significant figures AND <= (maxDecimals - szDecimals)
+// decimals, maxDecimals 6 for perps / 8 for spot; integer prices are always valid).
 
 import type {
   VenueAdapter,
@@ -32,16 +37,92 @@ import { getEvmSigner } from "../signers/index.js";
 import { signL1Action, signWithdraw } from "./hl-signing.js";
 import { HL_MAINNET, HL_TESTNET, infoPost, postExchange } from "./hl-transport.js";
 
-const PERP_MAX_DECIMALS = 6;
-
-interface ResolvedHl {
+/** A resolved HL market: the asset index the order references + size precision. */
+export interface ResolvedHl {
   coin: string;
   assetIndex: number;
   szDecimals: number;
+  isSpot: boolean;
+  /** Spot base-token native wei decimals (used by staking/transfers). Perp: undefined. */
+  weiDecimals?: number;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Meta = { universe: { name: string; szDecimals: number }[] } & Record<string, any>;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type SpotMeta = {
+  tokens: { name: string; szDecimals: number; weiDecimals: number; index: number }[];
+  universe: { tokens: [number, number]; name: string; index: number }[];
+} & Record<string, any>;
+
+/** Parse a marketId into {isSpot, query}. "hlspot:" => spot; "hl:"/"hyperliquid:"/bare => perp. */
+export function parseHlMarket(marketId: string): { isSpot: boolean; query: string } {
+  const i = marketId.indexOf(":");
+  if (i !== -1) {
+    const prefix = marketId.slice(0, i).toLowerCase();
+    if (prefix === "hlspot" || prefix === "spot") return { isSpot: true, query: marketId.slice(i + 1) };
+  }
+  return { isSpot: false, query: stripHlPrefix(marketId) };
+}
+
+/**
+ * Resolve a perp or spot market to its asset index + size precision + current mid.
+ * Standalone (shared by the adapter AND hl-venue.ts) so the spotMeta math lives in
+ * exactly one place. mid is numeric (null if the venue has no quote yet).
+ */
+export async function resolveHlAsset(
+  marketId: string,
+  opts: { host: string; fetchImpl?: typeof fetch },
+): Promise<{ ok: boolean; resolved?: ResolvedHl; mid: number | null; meta: Record<string, unknown> }> {
+  const { isSpot, query } = parseHlMarket(marketId);
+  const fetchImpl = opts.fetchImpl;
+  try {
+    if (!isSpot) {
+      const [meta, mids] = await Promise.all([
+        infoPost<Meta>({ type: "meta" }, { host: opts.host, fetchImpl }),
+        infoPost<Record<string, string>>({ type: "allMids" }, { host: opts.host, fetchImpl }),
+      ]);
+      const coin = query.toUpperCase();
+      const idx = meta.universe.findIndex((u) => String(u.name).toUpperCase() === coin);
+      if (idx < 0) return { ok: false, mid: null, meta: { error: `unknown HL perp "${coin}"` } };
+      const szDecimals = Number(meta.universe[idx].szDecimals);
+      const mid = mids?.[coin] != null ? Number(mids[coin]) : null;
+      const resolved: ResolvedHl = { coin, assetIndex: idx, szDecimals, isSpot: false };
+      return { ok: true, resolved, mid, meta: { coin, assetIndex: idx, szDecimals, isSpot: false, mid } };
+    }
+    // Spot: resolve the base token -> its USDC pair -> assetIndex 10000 + pairIndex.
+    const [spotMeta, mids] = await Promise.all([
+      infoPost<SpotMeta>({ type: "spotMeta" }, { host: opts.host, fetchImpl }),
+      infoPost<Record<string, string>>({ type: "allMids" }, { host: opts.host, fetchImpl }),
+    ]);
+    let pair: SpotMeta["universe"][number] | undefined;
+    let baseTok: SpotMeta["tokens"][number] | undefined;
+    if (query.startsWith("@")) {
+      const pidx = Number(query.slice(1));
+      pair = spotMeta.universe.find((u) => u.index === pidx) ?? spotMeta.universe[pidx];
+      baseTok = pair ? spotMeta.tokens.find((t) => t.index === pair!.tokens[0]) : undefined;
+      if (!pair) return { ok: false, mid: null, meta: { error: `unknown HL spot pair "${query}"` } };
+    } else {
+      const base = query.split("/")[0].toUpperCase();
+      baseTok = spotMeta.tokens.find((t) => String(t.name).toUpperCase() === base);
+      if (!baseTok) return { ok: false, mid: null, meta: { error: `unknown HL spot token "${base}"` } };
+      // USDC is token index 0; match the canonical base/USDC pair.
+      pair = spotMeta.universe.find((u) => u.tokens[0] === baseTok!.index && u.tokens[1] === 0);
+      if (!pair) return { ok: false, mid: null, meta: { error: `no USDC spot pair for "${base}"` } };
+    }
+    const pairIndex = pair.index ?? spotMeta.universe.indexOf(pair);
+    const assetIndex = 10000 + pairIndex;
+    const szDecimals = Number(baseTok?.szDecimals ?? 0);
+    const weiDecimals = Number(baseTok?.weiDecimals ?? 0);
+    const coin = String(baseTok?.name ?? query).toUpperCase();
+    const midRaw = mids?.[`@${pairIndex}`];
+    const mid = midRaw != null ? Number(midRaw) : null;
+    const resolved: ResolvedHl = { coin, assetIndex, szDecimals, isSpot: true, weiDecimals };
+    return { ok: true, resolved, mid, meta: { coin, assetIndex, pairIndex, tokenIndex: baseTok?.index, szDecimals, weiDecimals, isSpot: true, mid } };
+  } catch (e) {
+    return { ok: false, mid: null, meta: { error: (e as Error).message } };
+  }
+}
 
 export class HyperliquidAdapter implements VenueAdapter {
   readonly venue = "hyperliquid" as const;
@@ -69,37 +150,16 @@ export class HyperliquidAdapter implements VenueAdapter {
   }
 
   async resolveMarket(marketId: string): Promise<{ ok: boolean; meta: Record<string, unknown> }> {
-    const coin = stripHlPrefix(marketId).toUpperCase();
-    try {
-      const [meta, mids] = await Promise.all([
-        infoPost<Meta>({ type: "meta" }, { host: this.host, fetchImpl: this.fetchImpl }),
-        infoPost<Record<string, string>>({ type: "allMids" }, { host: this.host, fetchImpl: this.fetchImpl }),
-      ]);
-      const idx = meta.universe.findIndex((u) => String(u.name).toUpperCase() === coin);
-      if (idx < 0) return { ok: false, meta: { error: `unknown HL perp "${coin}"` } };
-      const szDecimals = Number(meta.universe[idx].szDecimals);
-      const resolved: ResolvedHl = { coin, assetIndex: idx, szDecimals };
-      this.cache.set(coin, resolved);
-      return {
-        ok: true,
-        meta: {
-          coin,
-          assetIndex: idx,
-          szDecimals,
-          mid: mids?.[coin] ?? null,
-          isMainnet: this.isMainnet,
-        },
-      };
-    } catch (e) {
-      return { ok: false, meta: { error: (e as Error).message } };
-    }
+    const r = await resolveHlAsset(marketId, { host: this.host, fetchImpl: this.fetchImpl });
+    if (r.ok && r.resolved) this.cache.set(cacheKey(marketId), r.resolved);
+    return { ok: r.ok, meta: { ...r.meta, isMainnet: this.isMainnet } };
   }
 
   async buildOpen(intent: OpenIntent): Promise<HlActionResult> {
     if (intent.venue !== "hyperliquid") throw new Error(`HyperliquidAdapter got a ${intent.venue} intent`);
     const m = await this.require(intent.marketId);
     const isBuy = intent.side === "buy";
-    const px = roundPx(Number(intent.worstPrice), m.szDecimals);
+    const px = roundPxGrid(Number(intent.worstPrice), m.szDecimals, m.isSpot);
     const rawSize = intent.amountKind === "collateral" ? Number(intent.amount) / px : Number(intent.amount);
     const sz = roundSz(rawSize, m.szDecimals);
     if (!(sz > 0)) throw new Error(`size rounds to 0 at szDecimals=${m.szDecimals} (amount ${intent.amount})`);
@@ -111,18 +171,20 @@ export class HyperliquidAdapter implements VenueAdapter {
     const frac = Number(intent.fraction);
     if (!(frac > 0) || frac > 1) throw new Error(`close fraction must be in (0,1], got "${intent.fraction}"`);
     const m = await this.require(intent.marketId);
-    const pos = await this.readPosition(m.coin);
+    const pos = await this.readPosition(m);
     if (!pos) throw new Error(`no HL position to close for ${m.coin}`);
-    // Close a long by SELLing, a short by BUYing; reduceOnly so it can't flip.
+    // Close a long by SELLing, a short by BUYing. Perps use reduceOnly so it can't
+    // flip; spot has no position to "reduce" (it's a balance) so reduceOnly is false.
     const isBuy = pos.side === "sell";
-    const px = roundPx(Number(intent.worstPrice), m.szDecimals);
+    const px = roundPxGrid(Number(intent.worstPrice), m.szDecimals, m.isSpot);
     const sz = roundSz(Number(pos.size) * frac, m.szDecimals);
     if (!(sz > 0)) throw new Error(`close size rounds to 0 (position ${pos.size}, fraction ${intent.fraction})`);
-    return this.buildAction(m, isBuy, px, sz, true);
+    return this.buildAction(m, isBuy, px, sz, !m.isSpot);
   }
 
   async state(marketId: string): Promise<PositionState | null> {
-    return this.readPosition(stripHlPrefix(marketId).toUpperCase());
+    const m = await this.require(marketId);
+    return this.readPosition(m);
   }
 
   async submit(build: BuildResult): Promise<SubmitResult> {
@@ -140,7 +202,7 @@ export class HyperliquidAdapter implements VenueAdapter {
    * off-ramp). User-signed action (not an L1 order). HL deducts a $1 fee; funds
    * land on Arbitrum in ~5 min. destination defaults to the signer's own address
    * (HL only releases to the account owner's address). Returns posted:true when
-   * HL accepts the signed withdraw.
+   * HL accepts the signed withdraw. (The CHEAP exit is hl-exit.ts / hl_bridge_out.)
    */
   async withdraw(amount: string, destination?: string): Promise<SubmitResult> {
     const signer = getEvmSigner("hyperliquid");
@@ -158,13 +220,13 @@ export class HyperliquidAdapter implements VenueAdapter {
   // ── internals ──────────────────────────────────────────────────────────────
 
   private async require(marketId: string): Promise<ResolvedHl> {
-    const coin = stripHlPrefix(marketId).toUpperCase();
-    const cached = this.cache.get(coin);
+    const key = cacheKey(marketId);
+    const cached = this.cache.get(key);
     if (cached) return cached;
     const r = await this.resolveMarket(marketId);
     if (!r.ok) throw new Error(`resolveMarket failed for ${marketId}: ${String(r.meta.error)}`);
-    const again = this.cache.get(coin);
-    if (!again) throw new Error(`resolveMarket did not cache ${coin}`);
+    const again = this.cache.get(key);
+    if (!again) throw new Error(`resolveMarket did not cache ${marketId}`);
     return again;
   }
 
@@ -193,7 +255,11 @@ export class HyperliquidAdapter implements VenueAdapter {
     };
   }
 
-  private async readPosition(coin: string): Promise<PositionState | null> {
+  private async readPosition(m: ResolvedHl): Promise<PositionState | null> {
+    return m.isSpot ? this.readSpotPosition(m) : this.readPerpPosition(m.coin);
+  }
+
+  private async readPerpPosition(coin: string): Promise<PositionState | null> {
     const user = getEvmSigner("hyperliquid").address;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const cs = await infoPost<any>(
@@ -216,9 +282,42 @@ export class HyperliquidAdapter implements VenueAdapter {
       unrealizedPnlUsd: String(pos.unrealizedPnl ?? "0"),
     };
   }
+
+  private async readSpotPosition(m: ResolvedHl): Promise<PositionState | null> {
+    const user = getEvmSigner("hyperliquid").address;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const cs = await infoPost<any>(
+      { type: "spotClearinghouseState", user },
+      { host: this.host, fetchImpl: this.fetchImpl },
+    );
+    const balances = cs?.balances ?? [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const b = balances.find((x: any) => String(x?.coin).toUpperCase() === m.coin);
+    const total = Number(b?.total ?? 0);
+    if (!(total > 0)) return null;
+    // A spot holding is a long token balance — no leverage, no short. avgPrice from
+    // entryNtl when present, else 0 (HL doesn't always surface a spot cost basis).
+    const entryNtl = Number(b?.entryNtl ?? 0);
+    const avg = entryNtl > 0 && total > 0 ? entryNtl / total : 0;
+    return {
+      venue: "hyperliquid",
+      marketId: `hlspot:${m.coin}`,
+      side: "buy",
+      size: String(total),
+      avgPrice: String(avg),
+      unrealizedPnlUsd: "0",
+    };
+  }
 }
 
 // ── pure helpers (exported for unit tests) ──────────────────────────────────
+
+/** Cache key that can't collide a perp coin with a spot token of the same name
+ *  (HYPE is BOTH a perp and a spot pair). */
+function cacheKey(marketId: string): string {
+  const { isSpot, query } = parseHlMarket(marketId);
+  return `${isSpot ? "spot" : "perp"}:${query.toUpperCase()}`;
+}
 
 /** Drop an "hl:" / "hyperliquid:" venue prefix if present. */
 export function stripHlPrefix(marketId: string): string {
@@ -230,18 +329,23 @@ export function stripHlPrefix(marketId: string): string {
 }
 
 /**
- * Round a price onto HL's grid: ≤5 significant figures AND ≤ (PERP_MAX_DECIMALS -
- * szDecimals) decimal places. Integer prices are always valid (HL exempts them
- * from the sig-fig rule). Mirrors the documented tick rule so an IOC limit isn't
- * rejected as off-grid.
+ * Round a price onto HL's grid: <=5 significant figures AND <= (maxDecimals -
+ * szDecimals) decimal places, maxDecimals 6 for perps / 8 for spot. Integer prices
+ * are always valid (HL exempts them from the sig-fig rule). Mirrors the documented
+ * tick rule so an IOC limit isn't rejected as off-grid.
  */
-export function roundPx(px: number, szDecimals: number): number {
+export function roundPxGrid(px: number, szDecimals: number, isSpot: boolean): number {
   if (!(px > 0) || !Number.isFinite(px)) throw new Error(`px must be a positive number (got ${px})`);
   if (Number.isInteger(px)) return px;
   const sig = Number(px.toPrecision(5));
-  const maxDecimals = Math.max(0, PERP_MAX_DECIMALS - szDecimals);
+  const maxDecimals = Math.max(0, (isSpot ? 8 : 6) - szDecimals);
   const factor = 10 ** maxDecimals;
   return Math.round(sig * factor) / factor;
+}
+
+/** Perp price grid (maxDecimals 6). Kept for back-compat; delegates to roundPxGrid. */
+export function roundPx(px: number, szDecimals: number): number {
+  return roundPxGrid(px, szDecimals, false);
 }
 
 /** Floor size to szDecimals so a BUY never exceeds budget / a close never exceeds the position. */

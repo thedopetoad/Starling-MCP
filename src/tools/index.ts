@@ -236,6 +236,57 @@ export interface HlExitOps {
   bridgeOut(args: { amount: string; dest: "arbitrum" | "polygon"; recipient: string }): Promise<HlBridgeOutResult>;
 }
 
+// ── the HL-specific venue surface (everything HyperCore offers beyond a plain IOC
+//    open/close) ────────────────────────────────────────────────────────────────
+// marketId: "hl:<COIN>" for a perp, "hlspot:<TOKEN>" (or "hlspot:@<pairIndex>") for
+// spot. These actions keep funds INSIDE the HL account (orders / margin / vault /
+// staking / perp<->spot) — getting USDC OUT is hl_bridge_out / withdraw3, which are
+// treasury-pinned. So none of these take a recipient.
+
+/** Advanced order: resting (Gtc) / post-only (Alo) / marketable (Ioc), optional
+ *  trigger (stop-loss / take-profit), optional client order id, perp OR spot. */
+export interface HlOrderArgs {
+  marketId: string;
+  side: Side;
+  amount: string;
+  amountKind: AmountKind;
+  worstPrice: string;
+  tif?: "Ioc" | "Gtc" | "Alo";
+  reduceOnly?: boolean;
+  trigger?: { triggerPx: string; isMarket: boolean; tpsl: "tp" | "sl" };
+  cloid?: string;
+}
+export interface HlCancelArgs { marketId: string; oid?: number; cloid?: string; all?: boolean }
+export interface HlLeverageArgs { marketId: string; leverage: number; cross: boolean }
+export interface HlIsoMarginArgs { marketId: string; usdDelta: string }
+export interface HlClassTransferArgs { amount: string; toPerp: boolean }
+export interface HlVaultArgs { vaultAddress: string; isDeposit: boolean; usd: string }
+export interface HlStakeArgs { direction: "deposit" | "withdraw"; hype: string }
+export interface HlDelegateArgs { validator: string; hype: string; undelegate: boolean }
+export interface HlTwapOrderArgs { marketId: string; side: Side; size: string; minutes: number; reduceOnly?: boolean; randomize?: boolean }
+export interface HlTwapCancelArgs { marketId: string; twapId: number }
+
+/**
+ * The full HyperCore surface as an injectable ops object (mirrors HlExitOps /
+ * PmBridgeOps). Each write EXECUTES locally (sign + POST /exchange) and returns a
+ * SubmitResult. account() is a comprehensive read (perp + spot + open orders +
+ * staking). Wired in server.ts only when an HL signer is loaded; absent => the
+ * hl_* tools report "not wired".
+ */
+export interface HlVenueOps {
+  account(): Promise<unknown>;
+  order(a: HlOrderArgs): Promise<SubmitResult>;
+  cancel(a: HlCancelArgs): Promise<SubmitResult>;
+  updateLeverage(a: HlLeverageArgs): Promise<SubmitResult>;
+  updateIsolatedMargin(a: HlIsoMarginArgs): Promise<SubmitResult>;
+  usdClassTransfer(a: HlClassTransferArgs): Promise<SubmitResult>;
+  vaultTransfer(a: HlVaultArgs): Promise<SubmitResult>;
+  stake(a: HlStakeArgs): Promise<SubmitResult>;
+  delegate(a: HlDelegateArgs): Promise<SubmitResult>;
+  twapOrder(a: HlTwapOrderArgs): Promise<SubmitResult>;
+  twapCancel(a: HlTwapCancelArgs): Promise<SubmitResult>;
+}
+
 /**
  * Everything the tools need, injected. server.ts constructs this once after
  * bootUnlock() and passes it on every call. Keeping it injected (vs importing
@@ -261,6 +312,10 @@ export interface ToolDeps {
   /** The cheap Hyperliquid exit (HyperCore->HyperEVM->CCTP). Optional: only wired
    *  when an HL signer is present; absent => hl_bridge_out reports "not wired". */
   hlExit?: HlExitOps;
+  /** The full HyperCore surface (spot, advanced orders, leverage, vaults, staking,
+   *  TWAP). Optional: only wired when an HL signer is present; absent => the hl_*
+   *  tools report "not wired". */
+  hlVenue?: HlVenueOps;
   /** Signs + broadcasts + confirms the UNSIGNED on-chain legs the builders produce
    *  (bridge / gas / venue-setup / EVM+SOL sweep), under inspect-before-sign. This
    *  is what lets the on-chain tools EXECUTE instead of handing back unsigned txs. */
@@ -578,6 +633,183 @@ export const MONEY_TOOLS = [
       required: ["provider", "flightId"],
     },
   },
+  {
+    name: "hl_account",
+    description:
+      "Read-only: the full Hyperliquid account — perp clearinghouse state (positions, margin, " +
+      "withdrawable), spot token balances, open orders (with oid/cloid for cancels), and the staking " +
+      "summary + per-validator delegations. No build, no idempotency key.",
+    inputSchema: { type: "object" as const, properties: {} },
+  },
+  {
+    name: "hl_order",
+    description:
+      "Place an advanced Hyperliquid order (PERP via hl:<COIN> or SPOT via hlspot:<TOKEN>). Beyond " +
+      "open_position's IOC: tif Gtc (rests on the book) / Alo (post-only) / Ioc, reduceOnly, an " +
+      "optional trigger (stop-loss / take-profit), and a client order id (cloid) for later cancel. " +
+      "Requires worstPrice (the limit; for a trigger it's the limit AFTER the trigger fires). Bounded " +
+      "by the same risk caps as open_position. Idempotent.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        marketId: { ...STR, description: 'Perp "hl:BTC" or spot "hlspot:HYPE" / "hlspot:@107".' },
+        side: SIDE_ENUM,
+        amount: { ...STR, description: "Decimal string." },
+        amountKind: AMOUNTKIND_ENUM,
+        worstPrice: { ...STR, description: "REQUIRED limit price per unit (no market orders)." },
+        tif: { type: "string" as const, enum: ["Ioc", "Gtc", "Alo"], description: "Default Gtc (rests). Ioc=marketable-or-cancel; Alo=post-only." },
+        reduceOnly: { ...BOOL, description: "Only reduce an existing perp position (never flip)." },
+        trigger: {
+          type: "object" as const,
+          description: "Conditional order. Omit for a plain limit.",
+          properties: {
+            triggerPx: { ...STR, description: "Price that arms the order." },
+            tpsl: { type: "string" as const, enum: ["tp", "sl"], description: "take-profit or stop-loss." },
+            isMarket: { ...BOOL, description: "Fire as market (default true) vs limit at worstPrice." },
+          },
+          required: ["triggerPx", "tpsl"],
+        },
+        cloid: { ...STR, description: 'Optional client order id "0x"+32 hex, for cancel-by-cloid.' },
+        ...IDEMPOTENCY,
+      },
+      required: ["marketId", "side", "amount", "amountKind", "worstPrice", "idempotencyKey"],
+    },
+  },
+  {
+    name: "hl_cancel",
+    description:
+      "Cancel resting Hyperliquid order(s) on a market: by oid, by cloid, or all:true (every open " +
+      "order on that market). Idempotent.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        marketId: STR,
+        oid: { ...NUM, description: "Cancel this exchange order id." },
+        cloid: { ...STR, description: "Cancel by client order id." },
+        all: { ...BOOL, description: "Cancel ALL open orders on this market." },
+        ...IDEMPOTENCY,
+      },
+      required: ["marketId", "idempotencyKey"],
+    },
+  },
+  {
+    name: "hl_update_leverage",
+    description:
+      "Set the leverage for a Hyperliquid PERP, cross or isolated. Affects new positions' margin. " +
+      "Idempotent.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        marketId: { ...STR, description: 'Perp market, e.g. "hl:BTC".' },
+        leverage: { ...NUM, description: "Integer leverage, e.g. 5." },
+        cross: { ...BOOL, description: "true = cross margin, false = isolated. Default cross." },
+        ...IDEMPOTENCY,
+      },
+      required: ["marketId", "leverage", "idempotencyKey"],
+    },
+  },
+  {
+    name: "hl_update_isolated_margin",
+    description:
+      "Add or remove isolated margin on a Hyperliquid PERP position. usdDelta positive adds margin, " +
+      "negative removes it. The position must be in isolated mode. Idempotent.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        marketId: STR,
+        usdDelta: { ...STR, description: "Decimal USD; positive adds, negative removes margin." },
+        ...IDEMPOTENCY,
+      },
+      required: ["marketId", "usdDelta", "idempotencyKey"],
+    },
+  },
+  {
+    name: "hl_usd_class_transfer",
+    description:
+      "Move USDC between the Hyperliquid PERP and SPOT sub-accounts (free, instant, internal). " +
+      "toPerp=true moves spot->perp; false moves perp->spot. No external recipient. Idempotent.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        amount: { ...STR, description: "Decimal USDC to move." },
+        toPerp: { ...BOOL, description: "true = spot->perp; false = perp->spot." },
+        ...IDEMPOTENCY,
+      },
+      required: ["amount", "toPerp", "idempotencyKey"],
+    },
+  },
+  {
+    name: "hl_vault_transfer",
+    description:
+      "Deposit into or withdraw from a Hyperliquid vault (e.g. HLP for market-making yield). Funds " +
+      "stay yours (redeemable to your own account); deposits have a lockup (HLP ~4 days). vaultAddress " +
+      "is the vault to join. Idempotent. NOTE: depositing to an unknown vault is a trading risk — " +
+      "verify the address (HLP is the official liquidity vault).",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        vaultAddress: { ...STR, description: "The vault's address (0x...). HLP = the official liquidity vault." },
+        isDeposit: { ...BOOL, description: "true = deposit, false = withdraw." },
+        usd: { ...STR, description: "Decimal USD to deposit/withdraw." },
+        ...IDEMPOTENCY,
+      },
+      required: ["vaultAddress", "isDeposit", "usd", "idempotencyKey"],
+    },
+  },
+  {
+    name: "hl_stake",
+    description:
+      "Move HYPE between your Hyperliquid SPOT balance and your STAKING balance. direction=deposit " +
+      "stakes (spot->staking); withdraw unstakes (staking->spot, enters a ~7-day unbonding queue). " +
+      "Delegate staked HYPE to a validator with hl_delegate to earn rewards. Idempotent.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        direction: { type: "string" as const, enum: ["deposit", "withdraw"], description: "deposit=stake, withdraw=unstake." },
+        hype: { ...STR, description: "Decimal HYPE amount." },
+        ...IDEMPOTENCY,
+      },
+      required: ["direction", "hype", "idempotencyKey"],
+    },
+  },
+  {
+    name: "hl_delegate",
+    description:
+      "Delegate (or undelegate) staked HYPE to a Hyperliquid validator to earn staking rewards. " +
+      "Requires HYPE already in the staking balance (hl_stake direction=deposit first). undelegate=true " +
+      "removes the delegation (1-day lockup after delegating). Idempotent.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        validator: { ...STR, description: "Validator address (0x..., 42 chars)." },
+        hype: { ...STR, description: "Decimal HYPE to delegate/undelegate." },
+        undelegate: { ...BOOL, description: "true = undelegate, false = delegate. Default false." },
+        ...IDEMPOTENCY,
+      },
+      required: ["validator", "hype", "idempotencyKey"],
+    },
+  },
+  {
+    name: "hl_twap",
+    description:
+      "Place or cancel a Hyperliquid TWAP order (slices a large size over `minutes` to reduce impact). " +
+      "action=place needs marketId/side/size/minutes; action=cancel needs marketId/twapId. Idempotent.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        action: { type: "string" as const, enum: ["place", "cancel"], description: "place a TWAP or cancel a running one." },
+        marketId: STR,
+        side: { ...SIDE_ENUM, description: "place only." },
+        size: { ...STR, description: "place only: base-asset size (shares) to work over the window." },
+        minutes: { ...NUM, description: "place only: minutes to spread the order over." },
+        reduceOnly: { ...BOOL, description: "place only: only reduce an existing position." },
+        randomize: { ...BOOL, description: "place only: randomize slice timing." },
+        twapId: { ...NUM, description: "cancel only: the TWAP id to cancel." },
+        ...IDEMPOTENCY,
+      },
+      required: ["action", "marketId", "idempotencyKey"],
+    },
+  },
 ];
 
 /** Tool names this registry owns — used by server.ts to route the switch. */
@@ -606,6 +838,25 @@ function optNum(a: Args, k: string): number | undefined {
   const v = a[k];
   if (v === undefined || v === null) return undefined;
   if (typeof v !== "number" || !Number.isFinite(v)) throw new ArgError(`"${k}" must be a finite number`);
+  return v;
+}
+
+function optBool(a: Args, k: string): boolean | undefined {
+  const v = a[k];
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== "boolean") throw new ArgError(`"${k}" must be a boolean`);
+  return v;
+}
+
+function reqNum(a: Args, k: string): number {
+  const v = a[k];
+  if (typeof v !== "number" || !Number.isFinite(v)) throw new ArgError(`"${k}" is required and must be a finite number`);
+  return v;
+}
+
+function reqBool(a: Args, k: string): boolean {
+  const v = a[k];
+  if (typeof v !== "boolean") throw new ArgError(`"${k}" is required and must be a boolean`);
   return v;
 }
 
@@ -1351,6 +1602,147 @@ async function handleAdvanceBridge(deps: ToolDeps, a: Args): Promise<ToolText> {
   return ok(res);
 }
 
+// ── Hyperliquid full-surface handlers ────────────────────────────────────────
+// Spot + advanced orders + leverage/margin + perp<->spot + vaults + staking + TWAP.
+// Same invariants as the generic tools: signer-gated, idempotent (reserve FIRST so a
+// replayed key never re-submits). These actions keep funds INSIDE the HL account, so
+// none take a recipient. hl_order additionally runs the open_position risk caps.
+
+const TIFS = ["Ioc", "Gtc", "Alo"] as const;
+const TPSLS = ["tp", "sl"] as const;
+
+function parseTrigger(a: Args): { triggerPx: string; isMarket: boolean; tpsl: "tp" | "sl" } | undefined {
+  const t = a.trigger;
+  if (t === undefined || t === null) return undefined;
+  if (typeof t !== "object") throw new ArgError(`"trigger" must be an object {triggerPx, tpsl, isMarket?}`);
+  const o = t as Args;
+  return { triggerPx: reqStr(o, "triggerPx"), tpsl: reqEnum(o, "tpsl", TPSLS), isMarket: optBool(o, "isMarket") ?? true };
+}
+
+/** Shared chokepoint for the HL write tools: signer + wired check, reserve the
+ *  intent (replay => NOT re-sent), execute, persist FILLED/FAILED. */
+async function runHlVenue(
+  deps: ToolDeps,
+  idempotencyKey: string,
+  kind: IntentRecord["kind"],
+  label: string,
+  exec: (v: HlVenueOps) => Promise<SubmitResult>,
+): Promise<ToolText> {
+  if (!deps.signerLoaded("hyperliquid")) return fail("signer_missing", "no hyperliquid signer loaded; see auth_check");
+  if (!deps.hlVenue) return fail("internal", "the HL venue surface is not wired this run (no hyperliquid signer at boot).");
+  const { replayed } = await reserveIntent(deps, idempotencyKey, kind);
+  if (replayed) {
+    return ok({ ok: true, replayed: true, note: `idempotencyKey already used — ${label} was already submitted and is NOT re-sent. Use a NEW key to repeat.` });
+  }
+  const res = await exec(deps.hlVenue);
+  await deps.store.patch(deps.botId, idempotencyKey, { state: res.posted ? "FILLED" : "FAILED", txHashes: res.txHashes ?? [] });
+  if (!res.posted) return fail("internal", res.error ?? `${label} rejected`, { submit: res });
+  return ok({ ok: true, replayed: false, label, submit: res });
+}
+
+async function handleHlAccount(deps: ToolDeps): Promise<ToolText> {
+  if (!deps.signerLoaded("hyperliquid")) return fail("signer_missing", "no hyperliquid signer loaded; see auth_check");
+  if (!deps.hlVenue) return fail("internal", "the HL venue surface is not wired this run (no hyperliquid signer at boot).");
+  const account = await deps.hlVenue.account();
+  return ok({ ok: true, account });
+}
+
+async function handleHlOrder(deps: ToolDeps, a: Args): Promise<ToolText> {
+  if (!deps.signerLoaded("hyperliquid")) return fail("signer_missing", "no hyperliquid signer loaded; see auth_check");
+  if (!deps.hlVenue) return fail("internal", "the HL venue surface is not wired this run (no hyperliquid signer at boot).");
+  const args = {
+    marketId: reqStr(a, "marketId"),
+    side: reqEnum(a, "side", SIDES) as Side,
+    amount: reqStr(a, "amount"),
+    amountKind: reqEnum(a, "amountKind", AMOUNT_KINDS) as AmountKind,
+    worstPrice: reqStr(a, "worstPrice"),
+    tif: optEnum(a, "tif", TIFS),
+    reduceOnly: optBool(a, "reduceOnly"),
+    trigger: parseTrigger(a),
+    cloid: optStr(a, "cloid"),
+  };
+  const idempotencyKey = reqStr(a, "idempotencyKey");
+
+  // Same policy gate as open_position — hl_order deploys market exposure.
+  const notionalUsd = openNotionalUsd(args.amount, args.amountKind, args.worstPrice);
+  const decision = checkOpen(notionalUsd, deps.limits(), deps.dailyUsage());
+  if (!decision.allowed) return fail("risk_blocked", decision.message, { policyCode: decision.code, notionalUsd });
+
+  const { replayed } = await reserveIntent(deps, idempotencyKey, "open");
+  if (replayed) {
+    return ok({ ok: true, replayed: true, note: "idempotencyKey already used — hl_order already submitted and is NOT re-sent. Use a NEW key." });
+  }
+  const res = await deps.hlVenue.order(args);
+  await deps.store.patch(deps.botId, idempotencyKey, { state: res.posted ? "FILLED" : "FAILED", txHashes: res.txHashes ?? [] });
+  if (!res.posted) return fail("internal", res.error ?? "hl_order rejected", { submit: res, notionalUsd });
+  deps.recordOpen(notionalUsd);
+  return ok({ ok: true, replayed: false, notionalUsd, submit: res, note: "HL order POSTed (locally signed, bounded by worstPrice + caps)." });
+}
+
+async function handleHlCancel(deps: ToolDeps, a: Args): Promise<ToolText> {
+  const marketId = reqStr(a, "marketId");
+  const oid = optNum(a, "oid");
+  const cloid = optStr(a, "cloid");
+  const all = optBool(a, "all");
+  if (oid == null && !cloid && !all) throw new ArgError("hl_cancel needs one of: oid, cloid, or all:true");
+  return runHlVenue(deps, reqStr(a, "idempotencyKey"), "cancel", "hl_cancel", (v) => v.cancel({ marketId, oid, cloid, all }));
+}
+
+async function handleHlUpdateLeverage(deps: ToolDeps, a: Args): Promise<ToolText> {
+  const marketId = reqStr(a, "marketId");
+  const leverage = reqNum(a, "leverage");
+  const cross = optBool(a, "cross") ?? true;
+  return runHlVenue(deps, reqStr(a, "idempotencyKey"), "open", "hl_update_leverage", (v) => v.updateLeverage({ marketId, leverage, cross }));
+}
+
+async function handleHlUpdateIsolatedMargin(deps: ToolDeps, a: Args): Promise<ToolText> {
+  const marketId = reqStr(a, "marketId");
+  const usdDelta = reqStr(a, "usdDelta");
+  return runHlVenue(deps, reqStr(a, "idempotencyKey"), "open", "hl_update_isolated_margin", (v) => v.updateIsolatedMargin({ marketId, usdDelta }));
+}
+
+async function handleHlUsdClassTransfer(deps: ToolDeps, a: Args): Promise<ToolText> {
+  const amount = reqStr(a, "amount");
+  const toPerp = reqBool(a, "toPerp");
+  return runHlVenue(deps, reqStr(a, "idempotencyKey"), "bridge", "hl_usd_class_transfer", (v) => v.usdClassTransfer({ amount, toPerp }));
+}
+
+async function handleHlVaultTransfer(deps: ToolDeps, a: Args): Promise<ToolText> {
+  const vaultAddress = reqStr(a, "vaultAddress");
+  const isDeposit = reqBool(a, "isDeposit");
+  const usd = reqStr(a, "usd");
+  return runHlVenue(deps, reqStr(a, "idempotencyKey"), "bridge", "hl_vault_transfer", (v) => v.vaultTransfer({ vaultAddress, isDeposit, usd }));
+}
+
+async function handleHlStake(deps: ToolDeps, a: Args): Promise<ToolText> {
+  const direction = reqEnum(a, "direction", ["deposit", "withdraw"] as const);
+  const hype = reqStr(a, "hype");
+  return runHlVenue(deps, reqStr(a, "idempotencyKey"), "bridge", "hl_stake", (v) => v.stake({ direction, hype }));
+}
+
+async function handleHlDelegate(deps: ToolDeps, a: Args): Promise<ToolText> {
+  const validator = reqStr(a, "validator");
+  const hype = reqStr(a, "hype");
+  const undelegate = optBool(a, "undelegate") ?? false;
+  return runHlVenue(deps, reqStr(a, "idempotencyKey"), "bridge", "hl_delegate", (v) => v.delegate({ validator, hype, undelegate }));
+}
+
+async function handleHlTwap(deps: ToolDeps, a: Args): Promise<ToolText> {
+  const action = reqEnum(a, "action", ["place", "cancel"] as const);
+  const marketId = reqStr(a, "marketId");
+  const idempotencyKey = reqStr(a, "idempotencyKey");
+  if (action === "cancel") {
+    const twapId = reqNum(a, "twapId");
+    return runHlVenue(deps, idempotencyKey, "cancel", "hl_twap_cancel", (v) => v.twapCancel({ marketId, twapId }));
+  }
+  const side = reqEnum(a, "side", SIDES) as Side;
+  const size = reqStr(a, "size");
+  const minutes = reqNum(a, "minutes");
+  const reduceOnly = optBool(a, "reduceOnly");
+  const randomize = optBool(a, "randomize");
+  return runHlVenue(deps, idempotencyKey, "open", "hl_twap_order", (v) => v.twapOrder({ marketId, side, size, minutes, reduceOnly, randomize }));
+}
+
 // ── retry gate (exposed for the confirm/retry wiring) ────────────────────────
 // Not a tool itself, but the canonical place the retry decision is made so the
 // quota + per-intent caps live next to the builds. server.ts's retry_intent (a
@@ -1430,6 +1822,26 @@ export async function handleMoneyTool(name: string, rawArgs: unknown, deps: Tool
         return await handleTransfer(deps, a);
       case "advance_bridge":
         return await handleAdvanceBridge(deps, a);
+      case "hl_account":
+        return await handleHlAccount(deps);
+      case "hl_order":
+        return await handleHlOrder(deps, a);
+      case "hl_cancel":
+        return await handleHlCancel(deps, a);
+      case "hl_update_leverage":
+        return await handleHlUpdateLeverage(deps, a);
+      case "hl_update_isolated_margin":
+        return await handleHlUpdateIsolatedMargin(deps, a);
+      case "hl_usd_class_transfer":
+        return await handleHlUsdClassTransfer(deps, a);
+      case "hl_vault_transfer":
+        return await handleHlVaultTransfer(deps, a);
+      case "hl_stake":
+        return await handleHlStake(deps, a);
+      case "hl_delegate":
+        return await handleHlDelegate(deps, a);
+      case "hl_twap":
+        return await handleHlTwap(deps, a);
       default:
         return fail("unknown_tool", `unknown tool ${name}`);
     }

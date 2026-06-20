@@ -53,6 +53,8 @@ const LIVE = process.argv.includes("--live");
 const arg = process.argv[3] && !process.argv[3].startsWith("--") ? process.argv[3] : undefined;
 const arg2 = process.argv[4] && !process.argv[4].startsWith("--") ? process.argv[4] : undefined;
 const arg3 = process.argv[5] && !process.argv[5].startsWith("--") ? process.argv[5] : undefined;
+/** All positional args (everything after the stage name, minus --flags). */
+const POS = process.argv.slice(3).filter((a) => !a.startsWith("--"));
 
 const solRpc = new SolanaRpc();
 const fmt = (n, d) => (Number(n) / 10 ** d).toFixed(d > 9 ? 6 : 4);
@@ -856,6 +858,95 @@ async function pmBridgeWithdraw() {
   }
 }
 
-const stages = { balances, swap, jup, bridge, "hl-deposit": hlDeposit, "hl-trade": hlTrade, "hl-close": hlClose, "hl-withdraw": hlWithdraw, "hl-to-evm": hlToEvm, "hl-usd-class": hlUsdClass, "hl-buy-hype": hlBuyHype, "hl-hype-to-evm": hlHypeToEvm, "hl-evm-cctp-out": hlEvmCctpOut, "hl-hype-from-evm": hlHypeFromEvm, "hl-sell-hype": hlSellHype, "pm-creds": pmCreds, "pm-enable": pmEnable, "enable-dw": enableDw, "poly-swap": polySwap, "pm-trade": pmTrade, "pm-bridge-withdraw": pmBridgeWithdraw, route, cctp, transfer };
+// ════════ NEW: the FULL HyperCore surface, driven through the SAME makeRealHlVenue()
+// ops the hl_* tools use (resolution + signing + POST). DRY prints the intent; --live
+// signs + posts. Verifies spot resolution by NAME, resting/trigger orders, cancel,
+// leverage, perp<->spot, vaults, staking, delegation, TWAP — end to end on mainnet.
+async function hlv() { const { makeRealHlVenue } = await import("../dist/adapters/hl-venue.js"); return makeRealHlVenue(); }
+const showR = (label, r) => console.log(`  ${label}:`, JSON.stringify({ posted: r.posted, status: r.status, orderId: r.orderId, error: r.error }));
+
+async function hlAccountStage() { console.log(JSON.stringify(await (await hlv()).account(), null, 2)); }
+
+// hl-order <market> <side> <usd> <worstPrice> [tif]   (amountKind=collateral)
+async function hlOrderStage() {
+  const [marketId, side, amount, worstPrice, tif = "Gtc"] = POS;
+  console.log(`hl_order ${side} $${amount} ${marketId} @ ${worstPrice} tif ${tif}`);
+  if (!LIVE) return void console.log("DRY — --live.");
+  showR("order", await (await hlv()).order({ marketId, side, amount, amountKind: "collateral", worstPrice, tif }));
+}
+
+// hl-order-sl <market> <side> <size> <worstPrice> <triggerPx> [tp|sl]   (reduceOnly trigger; size=shares)
+async function hlOrderSlStage() {
+  const [marketId, side, amount, worstPrice, triggerPx, tpsl = "sl"] = POS;
+  console.log(`hl_order TRIGGER ${tpsl} ${side} ${amount} ${marketId} trigger@${triggerPx} limit@${worstPrice}`);
+  if (!LIVE) return void console.log("DRY — --live.");
+  showR("trigger", await (await hlv()).order({ marketId, side, amount, amountKind: "shares", worstPrice, trigger: { triggerPx, isMarket: true, tpsl }, reduceOnly: true }));
+}
+
+// hl-cancel <market> <oid|all>
+async function hlCancelStage() {
+  const [marketId, sel] = POS;
+  const sel2 = sel === "all" ? { all: true } : { oid: Number(sel) };
+  console.log(`hl_cancel ${marketId} ${JSON.stringify(sel2)}`);
+  if (!LIVE) return void console.log("DRY — --live.");
+  showR("cancel", await (await hlv()).cancel({ marketId, ...sel2 }));
+}
+
+// hl-leverage <market> <lev> [iso]
+async function hlLeverageStage() {
+  const [marketId, lev, mode] = POS;
+  const cross = mode !== "iso";
+  console.log(`hl_update_leverage ${marketId} ${lev}x ${cross ? "cross" : "isolated"}`);
+  if (!LIVE) return void console.log("DRY — --live.");
+  showR("leverage", await (await hlv()).updateLeverage({ marketId, leverage: Number(lev), cross }));
+}
+
+// hl-class <amount> <toPerp:true|false>   (perp<->spot)
+async function hlClassStage() {
+  const [amount, toPerp] = POS;
+  console.log(`hl_usd_class_transfer ${amount} toPerp=${toPerp}`);
+  if (!LIVE) return void console.log("DRY — --live.");
+  showR("classTransfer", await (await hlv()).usdClassTransfer({ amount, toPerp: toPerp === "true" }));
+}
+
+// hl-vault <vaultAddress> <usd> <deposit|withdraw>
+async function hlVaultStage() {
+  const [vaultAddress, usd, dir = "deposit"] = POS;
+  console.log(`hl_vault_transfer ${dir} $${usd} -> ${vaultAddress}`);
+  if (!LIVE) return void console.log("DRY — --live.");
+  showR("vault", await (await hlv()).vaultTransfer({ vaultAddress, isDeposit: dir === "deposit", usd }));
+}
+
+// hl-stake <hype> <deposit|withdraw>
+async function hlStakeStage() {
+  const [hype, dir = "deposit"] = POS;
+  console.log(`hl_stake ${dir} ${hype} HYPE`);
+  if (!LIVE) return void console.log("DRY — --live.");
+  showR("stake", await (await hlv()).stake({ direction: dir, hype }));
+}
+
+// hl-delegate <validator> <hype> [undelegate]
+async function hlDelegateStage() {
+  const [validator, hype, und] = POS;
+  console.log(`hl_delegate ${validator} ${hype} HYPE undelegate=${und === "true"}`);
+  if (!LIVE) return void console.log("DRY — --live.");
+  showR("delegate", await (await hlv()).delegate({ validator, hype, undelegate: und === "true" }));
+}
+
+// hl-twap <market> <side> <size> <minutes>   |   hl-twap-cancel <market> <twapId>
+async function hlTwapStage() {
+  const [marketId, side, size, minutes] = POS;
+  console.log(`hl_twap place ${side} ${size} ${marketId} over ${minutes}m`);
+  if (!LIVE) return void console.log("DRY — --live.");
+  showR("twap", await (await hlv()).twapOrder({ marketId, side, size, minutes: Number(minutes) }));
+}
+async function hlTwapCancelStage() {
+  const [marketId, twapId] = POS;
+  console.log(`hl_twap cancel ${marketId} #${twapId}`);
+  if (!LIVE) return void console.log("DRY — --live.");
+  showR("twapCancel", await (await hlv()).twapCancel({ marketId, twapId: Number(twapId) }));
+}
+
+const stages = { balances, swap, jup, bridge, "hl-deposit": hlDeposit, "hl-trade": hlTrade, "hl-close": hlClose, "hl-withdraw": hlWithdraw, "hl-to-evm": hlToEvm, "hl-usd-class": hlUsdClass, "hl-buy-hype": hlBuyHype, "hl-hype-to-evm": hlHypeToEvm, "hl-evm-cctp-out": hlEvmCctpOut, "hl-hype-from-evm": hlHypeFromEvm, "hl-sell-hype": hlSellHype, "pm-creds": pmCreds, "pm-enable": pmEnable, "enable-dw": enableDw, "poly-swap": polySwap, "pm-trade": pmTrade, "pm-bridge-withdraw": pmBridgeWithdraw, route, cctp, transfer, "hl-account": hlAccountStage, "hl-order": hlOrderStage, "hl-order-sl": hlOrderSlStage, "hl-cancel": hlCancelStage, "hl-leverage": hlLeverageStage, "hl-class": hlClassStage, "hl-vault": hlVaultStage, "hl-stake": hlStakeStage, "hl-delegate": hlDelegateStage, "hl-twap": hlTwapStage, "hl-twap-cancel": hlTwapCancelStage };
 if (!stages[stage]) { console.log("stages:", Object.keys(stages).join(", ")); process.exit(1); }
 await stages[stage]();

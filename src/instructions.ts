@@ -95,10 +95,11 @@ Set these env vars BEFORE launching me; 0/unset means that check is OFF:
 open_position checks the caps BEFORE building, so a blocked trade never signs.
 
 ## Venues live THIS build (all zero Starling fee)
-- **Hyperliquid** (perps) — FULLY LIVE end to end: IOC limit orders signed as L1
-  actions (no gas, no approvals), plus the native withdraw3 off-ramp to Arbitrum.
-  enable_venue just says fund the L1. Set 'STARLING_NETWORK=mainnet' for real
-  funds (defaults to testnet).
+- **Hyperliquid** (perps + spot + vaults + staking) — FULLY LIVE end to end: IOC limit
+  orders signed as L1 actions (no gas, no approvals), the native withdraw3 off-ramp + the
+  cheap hl_bridge_out exit, AND the full HyperCore surface (advanced orders, leverage,
+  vaults, staking, TWAP) — see "Hyperliquid full surface" below. enable_venue just says
+  fund the L1. Set 'STARLING_NETWORK=mainnet' for real funds (defaults to testnet).
 - **Solana / Jupiter** (spot swap) — FULLY LIVE: keyless Jupiter Swap API (lite-api,
   no API key to leak, ZERO platform fee), v0 tx signed locally with the ed25519 key,
   broadcast + confirmed via the Solana RPC. Trades ANY SPL token, ANY pair: marketId is
@@ -116,6 +117,28 @@ open_position checks the caps BEFORE building, so a blocked trade never signs.
   it: the EOA swaps its bridged native USDC -> USDC.e and wraps -> pUSD straight into the
   DW (needs a little POL for those txs). Then open_position settles. Set
   STARLING_PM_DEPOSIT_WALLET=false only for a pre-registered bare-EOA/proxy.
+
+## Hyperliquid full surface (hl_* tools)
+Beyond open_position/close_position (generic IOC; perp via 'hl:<COIN>', spot via
+'hlspot:<TOKEN>' or 'hlspot:@<pairIndex>'), the whole HyperCore offering is wired. All
+hl_* writes are signer-gated + idempotent; funds stay INSIDE the HL account (getting USDC
+OUT is hl_bridge_out / withdraw3), so NONE take a recipient.
+- **hl_account** — read everything: perp positions / margin / withdrawable, spot
+  balances, open orders (with oid/cloid for cancels), staking summary + delegations.
+- **hl_order** — advanced order (perp OR spot): tif Gtc (rests on the book) / Alo
+  (post-only) / Ioc, reduceOnly, an optional trigger (stop-loss / take-profit), and a
+  client order id (cloid). Same risk caps as open_position. Needs a worstPrice.
+- **hl_cancel** — cancel by oid, by cloid, or all:true (every open order on a market).
+- **hl_update_leverage** — set a perp's leverage, cross or isolated.
+- **hl_update_isolated_margin** — add/remove isolated margin on a perp (usdDelta +/-).
+- **hl_usd_class_transfer** — move USDC between the perp and spot sub-accounts (free,
+  instant, internal — no external recipient).
+- **hl_vault_transfer** — deposit into / withdraw from a vault (e.g. HLP market-making
+  yield). Funds stay yours; deposits lock up (~4 days for HLP). Verify the vault address.
+- **hl_stake** — stake/unstake HYPE (spot <-> staking balance; unstake enters a ~7-day
+  unbonding queue). Then hl_delegate to a validator to earn.
+- **hl_delegate** — delegate / undelegate staked HYPE to a validator for staking rewards.
+- **hl_twap** — place or cancel a TWAP order (slices a large size over N minutes).
 
 ## Funding & gas (WIRED — 'transfer'/'advance_bridge' EXECUTE; build_* are lower-level)
 - **CCTP** — the ~1:1 USDC rail between EVM chains (Polygon <-> Arbitrum). Needs

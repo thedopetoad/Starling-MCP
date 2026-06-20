@@ -103,6 +103,42 @@ test("buildOpen assembles a keyed IOC order; submit POSTs it + classifies a fill
   assert.equal((state.lastExchange as any).vaultAddress, null);
 });
 
+test("buildOpen resolves a SPOT market to assetIndex 10000+pairIndex via spotMeta", async () => {
+  const state = {
+    info: {
+      spotMeta: {
+        tokens: [
+          { name: "USDC", index: 0, szDecimals: 8, weiDecimals: 8 },
+          { name: "HYPE", index: 150, szDecimals: 2, weiDecimals: 8 },
+        ],
+        universe: [{ tokens: [150, 0], name: "@107", index: 107 }],
+      },
+      allMids: { "@107": "40" },
+    },
+    exchangeReply: {
+      status: "ok",
+      response: { type: "order", data: { statuses: [{ filled: { totalSz: "0.97", avgPx: "40", oid: 5 } }] } },
+    },
+    lastExchange: undefined as unknown,
+  };
+  const a = new HyperliquidAdapter({ fetchImpl: router(state), mainnet: true });
+  const build = await a.buildOpen({
+    venue: "hyperliquid",
+    marketId: "hlspot:HYPE",
+    side: "buy",
+    amount: "40",
+    amountKind: "collateral",
+    worstPrice: "41",
+    idempotencyKey: "s1",
+  });
+  assert.equal(build.assetIndex, 10107); // 10000 + spot pair index 107
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const wire = (build.action.orders as any[])[0];
+  assert.equal(wire.a, 10107);
+  assert.equal(wire.p, "41"); // integer price passes the grid
+  assert.equal(wire.s, "0.97"); // 40/41 floored to szDecimals 2 (the TOKEN's)
+});
+
 test("classifyHlResponse treats a non-ok status + per-order error as a rejection", () => {
   assert.equal(classifyHlResponse(true, { status: "err", response: "Insufficient margin" }).posted, false);
   const perOrder = classifyHlResponse(true, {
