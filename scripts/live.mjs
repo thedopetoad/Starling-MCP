@@ -333,6 +333,41 @@ async function hlWithdraw() {
   }
 }
 
+// ── HyperCore -> HyperEVM bridge test (the cheap-exit first hop) ─────────────
+// Moves USDC perp->spot (usdClassTransfer), then spotSend to USDC's system address
+// (0x2000...0000) to credit HyperEVM. Settles the 2-USDC question: check afterward
+// which HyperEVM token got credited (HyperCore-linked 0x6b9e7731 vs Circle-native
+// 0xb88339CB). usage: hl-to-evm <amt> [--live]. (Read HyperEVM balances via curl;
+// node can't reach rpc.hyperliquid.xyz in this sandbox.)
+async function hlToEvm() {
+  const amt = arg || "2";
+  const { signUsdClassTransfer, signSpotSend, hyperCoreSystemAddress } = await import("../dist/adapters/hl-signing.js");
+  const { postExchange, HL_MAINNET } = await import("../dist/adapters/hl-transport.js");
+  const signer = getEvmSigner("hyperliquid");
+  const USDC_TOKEN = "USDC:0x6d1e7cde53ba9467b783cb7c530ce054"; // name:tokenId from spotMeta
+  const SYS = hyperCoreSystemAddress(0); // USDC = token index 0
+  console.log(`HyperCore->HyperEVM | HL ${signer.address} | spotSend ${amt} USDC -> system ${SYS}`);
+  if (!LIVE) {
+    const u = signUsdClassTransfer({ signer, amount: amt, toPerp: false, nonce: Date.now(), isMainnet: true });
+    const s = signSpotSend({ signer, destination: SYS, token: USDC_TOKEN, amount: amt, time: Date.now(), isMainnet: true });
+    console.log("  usdClassTransfer:", JSON.stringify(u.action));
+    console.log("  spotSend       :", JSON.stringify(s.action));
+    return void console.log("DRY — --live to execute.");
+  }
+  const post = (signed) => postExchange({ action: signed.action, nonce: signed.nonce, signature: signed.signature, vaultAddress: null }, { host: HL_MAINNET });
+  const toSpot = (Number(amt) + 0.2).toFixed(2);
+  console.log(`\n>>> usdClassTransfer perp->spot ${toSpot} <<<`);
+  let r = await post(signUsdClassTransfer({ signer, amount: toSpot, toPerp: false, nonce: Date.now(), isMainnet: true }));
+  console.log("   ", JSON.stringify({ posted: r.posted, status: r.status, error: r.error, raw: r.raw }));
+  if (!r.posted) return void console.log("  STOP: perp->spot rejected.");
+  await sleep(3000);
+  console.log(`\n>>> spotSend ${amt} USDC -> HyperEVM (system ${SYS}) <<<`);
+  r = await post(signSpotSend({ signer, destination: SYS, token: USDC_TOKEN, amount: amt, time: Date.now(), isMainnet: true }));
+  console.log("   ", JSON.stringify({ posted: r.posted, status: r.status, error: r.error, raw: r.raw }));
+  console.log("\nNow check which HyperEVM token got credited (curl rpc.hyperliquid.xyz/evm balanceOf for the HL address):");
+  console.log("  linked 0x6b9e7731… (spotMeta) vs Circle-native 0xb88339CB… (CCTP-burnable)");
+}
+
 // ── Polymarket L2 CLOB cred derivation (createOrDeriveApiKey) ────────────────
 // L1 ClobAuth EIP-712 (domain ClobAuthDomain v1 chainId 137, no verifyingContract)
 // signed by the EOA -> L1 headers -> POST /auth/api-key (create) else GET
@@ -677,6 +712,6 @@ async function pmBridgeWithdraw() {
   }
 }
 
-const stages = { balances, swap, jup, bridge, "hl-deposit": hlDeposit, "hl-trade": hlTrade, "hl-close": hlClose, "hl-withdraw": hlWithdraw, "pm-creds": pmCreds, "pm-enable": pmEnable, "enable-dw": enableDw, "poly-swap": polySwap, "pm-trade": pmTrade, "pm-bridge-withdraw": pmBridgeWithdraw, route, cctp, transfer };
+const stages = { balances, swap, jup, bridge, "hl-deposit": hlDeposit, "hl-trade": hlTrade, "hl-close": hlClose, "hl-withdraw": hlWithdraw, "hl-to-evm": hlToEvm, "pm-creds": pmCreds, "pm-enable": pmEnable, "enable-dw": enableDw, "poly-swap": polySwap, "pm-trade": pmTrade, "pm-bridge-withdraw": pmBridgeWithdraw, route, cctp, transfer };
 if (!stages[stage]) { console.log("stages:", Object.keys(stages).join(", ")); process.exit(1); }
 await stages[stage]();

@@ -150,6 +150,121 @@ export function signWithdraw(args: {
   };
 }
 
+// ── usdClassTransfer (perp <-> spot) ────────────────────────────────────────
+// Move USDC between the perp and spot sub-accounts on HyperCore. Same user-signed
+// scheme as withdraw3. toPerp=false => perp -> spot (needed before a spotSend to
+// HyperEVM); toPerp=true => spot -> perp. Free + instant. Types verbatim from the
+// hyperliquid-python-sdk (HyperliquidTransaction:UsdClassTransfer).
+const USD_CLASS_TRANSFER_TYPES = {
+  "HyperliquidTransaction:UsdClassTransfer": [
+    { name: "hyperliquidChain", type: "string" },
+    { name: "amount", type: "string" },
+    { name: "toPerp", type: "bool" },
+    { name: "nonce", type: "uint64" },
+  ],
+} as const;
+
+export interface HlUsdClassTransferAction {
+  type: "usdClassTransfer";
+  hyperliquidChain: "Mainnet" | "Testnet";
+  signatureChainId: `0x${string}`;
+  amount: string;
+  toPerp: boolean;
+  nonce: number;
+}
+
+export function signUsdClassTransfer(args: {
+  signer: EvmSigner;
+  amount: string;
+  toPerp: boolean;
+  nonce: number;
+  isMainnet: boolean;
+}): { action: HlUsdClassTransferAction; signature: RsvSignature; nonce: number } {
+  const signatureChainId: `0x${string}` = args.isMainnet ? "0xa4b1" : "0x66eee";
+  const chainId = args.isMainnet ? 42161 : 421614;
+  const hyperliquidChain = args.isMainnet ? "Mainnet" : "Testnet";
+  const digest = hashTypedData({
+    domain: { name: "HyperliquidSignTransaction", version: "1", chainId, verifyingContract: "0x0000000000000000000000000000000000000000" },
+    types: USD_CLASS_TRANSFER_TYPES,
+    primaryType: "HyperliquidTransaction:UsdClassTransfer",
+    message: { hyperliquidChain, amount: args.amount, toPerp: args.toPerp, nonce: BigInt(args.nonce) },
+  });
+  const rsv = args.signer.signDigest(hexToBytes(digest));
+  return {
+    action: { type: "usdClassTransfer", hyperliquidChain, signatureChainId, amount: args.amount, toPerp: args.toPerp, nonce: args.nonce },
+    signature: { r: `0x${toHex(rsv.subarray(0, 32))}`, s: `0x${toHex(rsv.subarray(32, 64))}`, v: rsv[64] },
+    nonce: args.nonce,
+  };
+}
+
+// ── spotSend (send a spot token to any address, incl. the HyperEVM bridge) ───
+// Send a HyperCore SPOT token to `destination`. To bridge USDC HyperCore->HyperEVM,
+// destination = the token's SYSTEM ADDRESS (hyperCoreSystemAddress(tokenIndex)) and
+// the credited HyperEVM ERC-20 is the token's linked `evmContract` (spotMeta). The
+// `token` field is "NAME:tokenId" (tokenId from spotMeta). Types verbatim from the
+// python SDK (HyperliquidTransaction:SpotSend).
+const SPOT_SEND_TYPES = {
+  "HyperliquidTransaction:SpotSend": [
+    { name: "hyperliquidChain", type: "string" },
+    { name: "destination", type: "string" },
+    { name: "token", type: "string" },
+    { name: "amount", type: "string" },
+    { name: "time", type: "uint64" },
+  ],
+} as const;
+
+export interface HlSpotSendAction {
+  type: "spotSend";
+  hyperliquidChain: "Mainnet" | "Testnet";
+  signatureChainId: `0x${string}`;
+  destination: string;
+  token: string;
+  amount: string;
+  time: number;
+}
+
+export function signSpotSend(args: {
+  signer: EvmSigner;
+  destination: string;
+  /** "NAME:tokenId" from spotMeta, e.g. "USDC:0x6d1e7cde53ba9467b783cb7c530ce054". */
+  token: string;
+  amount: string;
+  time: number;
+  isMainnet: boolean;
+}): { action: HlSpotSendAction; signature: RsvSignature; nonce: number } {
+  const destination = args.destination.toLowerCase();
+  const signatureChainId: `0x${string}` = args.isMainnet ? "0xa4b1" : "0x66eee";
+  const chainId = args.isMainnet ? 42161 : 421614;
+  const hyperliquidChain = args.isMainnet ? "Mainnet" : "Testnet";
+  const digest = hashTypedData({
+    domain: { name: "HyperliquidSignTransaction", version: "1", chainId, verifyingContract: "0x0000000000000000000000000000000000000000" },
+    types: SPOT_SEND_TYPES,
+    primaryType: "HyperliquidTransaction:SpotSend",
+    message: { hyperliquidChain, destination, token: args.token, amount: args.amount, time: BigInt(args.time) },
+  });
+  const rsv = args.signer.signDigest(hexToBytes(digest));
+  return {
+    action: { type: "spotSend", hyperliquidChain, signatureChainId, destination, token: args.token, amount: args.amount, time: args.time },
+    signature: { r: `0x${toHex(rsv.subarray(0, 32))}`, s: `0x${toHex(rsv.subarray(32, 64))}`, v: rsv[64] },
+    nonce: args.time,
+  };
+}
+
+/**
+ * The HyperCore->HyperEVM SYSTEM ADDRESS for a spot token: first byte 0x20, the
+ * remaining 19 bytes are the token index big-endian (zeros for the low ones). USDC
+ * is token index 0 => 0x2000000000000000000000000000000000000000. spotSend-ing a
+ * token to THIS address credits its linked ERC-20 on HyperEVM.
+ * Source: HL docs (HyperCore<>HyperEVM transfers).
+ */
+export function hyperCoreSystemAddress(tokenIndex: number): `0x${string}` {
+  if (!Number.isInteger(tokenIndex) || tokenIndex < 0 || tokenIndex > 0xffffffff) {
+    throw new Error(`tokenIndex must be a uint32 (got ${tokenIndex})`);
+  }
+  // 19 bytes = 38 hex chars after the leading 0x20 byte.
+  return `0x20${tokenIndex.toString(16).padStart(38, "0")}` as `0x${string}`;
+}
+
 // ── byte helpers ─────────────────────────────────────────────────────────────
 
 /** nonce is a ms timestamp — well within the 53-bit safe-integer range. */
