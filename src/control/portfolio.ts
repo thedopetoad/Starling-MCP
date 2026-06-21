@@ -6,11 +6,12 @@
 // flaky RPC never crashes the heartbeat. Polled on a SLOW timer (see server.ts)
 // and cached — never on the 1.5s control tick.
 //
-// Honest scope (v1, Analytics is a stated WIP):
-//   - USDC is valued at $1. Hyperliquid accountValue is already USD.
-//   - Native SOL/MATIC are reported as AMOUNTS (gas), left unpriced (usd:null).
-//   - Positions: Hyperliquid perps (enumerable via clearinghouseState). Polymarket
-//     and Jupiter positions need per-market ids to enumerate and are deferred.
+// Scope:
+//   - USDC = $1; Hyperliquid accountValue is already USD; native SOL/MATIC priced via CoinGecko.
+//   - Solana SPL tokens (incl. tokens locked in open Jupiter orders) are enumerated
+//     and priced via the keyless Jupiter token API, so the dashboard shows ALL holdings.
+//   - Positions: Hyperliquid perps (via clearinghouseState). Polymarket positions
+//     need per-market ids to enumerate and are deferred.
 import { EvmRpc } from "../adapters/evm-rpc.js";
 import { SolanaRpc, associatedTokenAddress } from "../adapters/solana-rpc.js";
 import { USDC_MINT } from "../adapters/jupiter.js";
@@ -28,14 +29,26 @@ export interface PortfolioPosition {
   unrealizedPnlUsd: number;
 }
 
+/** A non-USDC fungible token holding — an SPL token in the wallet, or one escrowed
+ *  in an open Jupiter order. `usd` is null when no price was available this refresh. */
+export interface TokenHolding {
+  symbol: string;
+  mint: string;
+  amount: number;
+  usd: number | null;
+  location: "wallet" | "order";
+}
+
 export interface WalletState {
   chain: Chain;
   address: string;
-  /** Native gas token (SOL / MATIC). Unpriced in v1 — usd is null. */
+  /** Native gas token (SOL / MATIC), priced via CoinGecko (usd null if unavailable). */
   native: { symbol: string; amount: number; usd: number | null };
   /** USDC balance (valued 1:1). */
   usdc: number;
-  /** USD value attributable to this wallet (USDC + venue account value). */
+  /** Non-USDC token holdings incl. tokens locked in open orders (Solana only in v1). */
+  tokens?: TokenHolding[];
+  /** USD value attributable to this wallet (USDC + tokens + native + venue value). */
   valueUsd: number;
   /** True if any read for this wallet failed and the numbers may be incomplete. */
   partial: boolean;
@@ -92,33 +105,116 @@ async function erc20Balance(rpc: EvmRpc, token: string, owner: string, decimals:
   return Number(raw) / 10 ** decimals;
 }
 
+// ── Jupiter helpers for full token visibility (keyless lite-api; best-effort) ──
+const JUP_TOKEN_API = "https://lite-api.jup.ag/tokens/v2";
+const JUP_TRIGGER_API = "https://lite-api.jup.ag/trigger/v1";
+
+/** Symbol + live USD price for any SPL mint (Jupiter token search). Null on any
+ *  failure so the portfolio still renders (the token just shows unpriced). */
+async function jupTokenInfo(mint: string): Promise<{ symbol: string; usdPrice: number | null } | null> {
+  try {
+    const res = await timed(fetch(`${JUP_TOKEN_API}/search?query=${mint}`), `jup token ${mint.slice(0, 4)}`);
+    if (!res.ok) return null;
+    const arr = (await res.json()) as Array<{ id: string; symbol?: string; usdPrice?: number }>;
+    const hit = Array.isArray(arr) ? arr.find((t) => t.id === mint) : undefined;
+    if (!hit) return null;
+    return { symbol: hit.symbol || mint.slice(0, 4), usdPrice: typeof hit.usdPrice === "number" ? hit.usdPrice : null };
+  } catch {
+    return null;
+  }
+}
+
+/** Tokens ESCROWED in the user's open Jupiter limit (trigger) orders — they've left
+ *  the wallet's token accounts, so we add them back to show true holdings.
+ *  makingAmount/inputMint = what's locked. Best-effort -> [] on failure. */
+async function jupOpenOrderHoldings(owner: string): Promise<{ mint: string; amount: number }[]> {
+  try {
+    const res = await timed(
+      fetch(`${JUP_TRIGGER_API}/getTriggerOrders?user=${owner}&orderStatus=active`),
+      "jup open orders",
+    );
+    if (!res.ok) return [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const j = (await res.json()) as any;
+    const orders = Array.isArray(j?.orders) ? j.orders : Array.isArray(j) ? j : [];
+    const out: { mint: string; amount: number }[] = [];
+    for (const o of orders) {
+      const mint = o?.inputMint;
+      const amount = Number(o?.makingAmount); // lite-api returns UI (decimal) amounts
+      if (mint && amount > 0) out.push({ mint, amount });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 async function readSolana(address: string): Promise<WalletState> {
   const rpc = new SolanaRpc();
   let sol = 0,
-    usdc = 0,
     partial = false;
   try {
     sol = Number(await timedRetry(() => rpc.getBalanceLamports(address), "sol getBalance")) / 1e9;
   } catch {
     partial = true;
   }
+
+  // Enumerate EVERY SPL token in the wallet. Falls back to the light USDC-only read
+  // if the heavy getTokenAccountsByOwner fails (e.g. a throttling RPC), so it never regresses.
+  let walletTokens: { mint: string; uiAmount: number }[] | null = null;
   try {
-    // Light path: read the specific associated token account, not the heavy
-    // getTokenAccountsByOwner (public RPCs rate-limit the latter hard).
-    const ata = associatedTokenAddress(address, USDC_MINT);
-    const t = await timedRetry(() => rpc.getTokenAccountBalance(ata), "sol USDC");
-    usdc = t?.uiAmount ?? 0;
-  } catch (e) {
-    // A missing ATA just means zero USDC — not a read failure, so don't flag partial.
-    if (/find account|could not find|account.*not.*exist/i.test(String((e as Error)?.message))) usdc = 0;
-    else partial = true;
+    const accts = await timedRetry(() => rpc.getAllTokenAccounts(address), "sol all tokens");
+    walletTokens = accts.filter((a) => a.uiAmount > 0).map((a) => ({ mint: a.mint, uiAmount: a.uiAmount }));
+  } catch {
+    walletTokens = null;
   }
+  if (walletTokens === null) {
+    try {
+      const ata = associatedTokenAddress(address, USDC_MINT);
+      const t = await timedRetry(() => rpc.getTokenAccountBalance(ata), "sol USDC");
+      walletTokens = [{ mint: USDC_MINT, uiAmount: t?.uiAmount ?? 0 }];
+    } catch (e) {
+      if (/find account|could not find|account.*not.*exist/i.test(String((e as Error)?.message))) walletTokens = [];
+      else {
+        walletTokens = [];
+        partial = true;
+      }
+    }
+  }
+
+  // Tokens escrowed in open Jupiter orders (left the wallet but still ours).
+  const orderHoldings = await jupOpenOrderHoldings(address);
+
+  const usdc = walletTokens.filter((t) => t.mint === USDC_MINT).reduce((s, t) => s + t.uiAmount, 0);
+
+  // Build the non-USDC token list (wallet + escrowed) and price each via Jupiter.
+  const holdings: { mint: string; amount: number; location: "wallet" | "order" }[] = [
+    ...walletTokens.filter((t) => t.mint !== USDC_MINT).map((t) => ({ mint: t.mint, amount: t.uiAmount, location: "wallet" as const })),
+    ...orderHoldings.filter((o) => o.mint !== USDC_MINT).map((o) => ({ mint: o.mint, amount: o.amount, location: "order" as const })),
+  ];
+  const tokens: TokenHolding[] = [];
+  let tokensUsd = 0;
+  for (const h of holdings) {
+    const info = await jupTokenInfo(h.mint);
+    const usd = info?.usdPrice != null ? h.amount * info.usdPrice : null;
+    if (usd != null) tokensUsd += usd;
+    else partial = true; // a token we couldn't price -> totals are incomplete
+    tokens.push({ symbol: info?.symbol || h.mint.slice(0, 4), mint: h.mint, amount: h.amount, usd, location: h.location });
+  }
+  // USDC parked in an open order (uncommon here, but be complete).
+  const orderUsdc = orderHoldings.filter((o) => o.mint === USDC_MINT).reduce((s, o) => s + o.amount, 0);
+  if (orderUsdc > 0) {
+    tokens.push({ symbol: "USDC", mint: USDC_MINT, amount: orderUsdc, usd: orderUsdc, location: "order" });
+    tokensUsd += orderUsdc;
+  }
+
   return {
     chain: "solana",
     address,
     native: { symbol: "SOL", amount: sol, usd: null },
     usdc,
-    valueUsd: usdc,
+    tokens,
+    valueUsd: usdc + tokensUsd, // native USD added by the caller
     partial,
   };
 }
@@ -264,8 +360,8 @@ export async function readPortfolio(addrs: Addrs, network: string): Promise<Port
     totalValueUsd,
     unrealizedPnlUsd,
     pricingNote: priced
-      ? "USDC=$1; native SOL/MATIC priced via CoinGecko; HL=accountValue. PM/Jupiter positions WIP"
-      : "USDC=$1; HL=accountValue; native price unavailable this tick. PM/Jupiter positions WIP",
+      ? "USDC=$1; SOL/MATIC via CoinGecko; SPL tokens + open Jupiter orders via Jupiter; HL=accountValue"
+      : "USDC=$1; SPL tokens via Jupiter; HL=accountValue; native price unavailable this tick",
     partial,
   };
 }

@@ -101,6 +101,28 @@ export class SolanaRpc {
     return { amount: acct.amount, decimals: acct.decimals, uiAmount: acct.uiAmount };
   }
 
+  /** ALL SPL token balances for an owner (the heavy getTokenAccountsByOwner by
+   *  program). Public RPCs rate-limit this — use a real RPC via STARLING_SOLANA_RPC.
+   *  Returns one entry per token account with a parsed amount. */
+  async getAllTokenAccounts(
+    owner: string,
+  ): Promise<{ mint: string; amount: string; decimals: number; uiAmount: number }[]> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const r = await this.call<any>("getTokenAccountsByOwner", [
+      owner,
+      { programId: TOKEN_PROGRAM },
+      { encoding: "jsonParsed", commitment: "confirmed" },
+    ]);
+    const out: { mint: string; amount: string; decimals: number; uiAmount: number }[] = [];
+    for (const acc of r?.value ?? []) {
+      const info = acc?.account?.data?.parsed?.info;
+      const ta = info?.tokenAmount;
+      if (!info?.mint || !ta) continue;
+      out.push({ mint: info.mint, amount: ta.amount, decimals: ta.decimals, uiAmount: Number(ta.uiAmount ?? 0) });
+    }
+    return out;
+  }
+
   /** Balance of a SPECIFIC token account (e.g. an ATA) — a much lighter call than
    *  getTokenAccountsByOwner, so public RPCs serve it reliably. THROWS if the
    *  account doesn't exist ("could not find account"); callers treat that as 0. */
