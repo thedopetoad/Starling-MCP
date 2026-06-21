@@ -55,6 +55,7 @@ import {
   haltInfo,
   isHaltBlocked,
 } from "./control/plane.js";
+import { readPortfolio, type Portfolio } from "./control/portfolio.js";
 
 const log = (m: string) => process.stderr.write(`[starling] ${m}\n`);
 const text = (obj: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(obj, null, 2) }] });
@@ -410,7 +411,12 @@ export async function startServer(): Promise<void> {
   // process alive on its own.
   const controlTick = async () => {
     try {
-      await writeStatus(statusSnapshot());
+      await writeStatus({
+        ...statusSnapshot(),
+        portfolio: cachedPortfolio,
+        portfolioTs: cachedPortfolio?.ts ?? null,
+        withdrawDestinations: cachedWithdrawDests,
+      });
     } catch (e) {
       log(`status publish failed: ${(e as Error).message}`);
     }
@@ -420,15 +426,52 @@ export async function startServer(): Promise<void> {
       log(`control drain failed: ${(e as Error).message}`);
     }
   };
+
+  // Slow portfolio/withdraw-dest poller feeds the cache the tick publishes. Run
+  // once up front (so the first heartbeat already carries balances), then on a
+  // 20s timer. unref() so neither timer keeps the process alive on its own.
+  void refreshPortfolio(deps);
+  setInterval(() => void refreshPortfolio(deps), PORTFOLIO_REFRESH_MS).unref();
+
   await controlTick();
   setInterval(() => void controlTick(), 1500).unref();
   // Do NOT exit on stdin EOF — supervised restarts must not be tripped by it.
 }
 
+// ── portfolio + withdraw-destination cache (refreshed on a SLOW timer) ─────────
+// The 1.5s control tick must stay cheap, but the dashboard's Analytics + Wallet
+// States pages need RPC-backed balances/positions and the resolved withdraw
+// destinations. We poll those every PORTFOLIO_REFRESH_MS into a cache and the tick
+// just publishes the cache (with its own `ts` so the UI can show freshness).
+const PORTFOLIO_REFRESH_MS = 20_000;
+let cachedPortfolio: Portfolio | null = null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let cachedWithdrawDests: any = null;
+let portfolioRefreshing = false;
+
+async function refreshPortfolio(deps: ToolDeps): Promise<void> {
+  if (portfolioRefreshing) return; // never overlap slow RPC reads
+  portfolioRefreshing = true;
+  try {
+    const network = process.env.STARLING_NETWORK ?? "testnet";
+    cachedPortfolio = await readPortfolio(loadedAddresses(), network);
+  } catch (e) {
+    log(`portfolio refresh failed: ${(e as Error).message}`);
+  }
+  try {
+    cachedWithdrawDests = await treasuryReport(await deps.treasury());
+  } catch (e) {
+    log(`withdraw-dest refresh failed: ${(e as Error).message}`);
+  } finally {
+    portfolioRefreshing = false;
+  }
+}
+
 // The cheap, no-I/O snapshot the dashboard renders (network / key source / per-venue
 // signer + address / trading state). Mirrors what auth_check reports, minus the
 // RPC-backed gas reserve so it's safe to run every ~1.5s. tradingEnabled folds in
-// both the env kill switch and the dashboard halt flag.
+// both the env kill switch and the dashboard halt flag. The RPC-backed portfolio +
+// withdraw destinations are merged in at publish time from the slow-refreshed cache.
 function statusSnapshot() {
   const addrs = loadedAddresses();
   const envKill = (process.env.STARLING_KILL_SWITCH ?? "").toLowerCase() === "true";
