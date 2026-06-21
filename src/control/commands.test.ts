@@ -190,8 +190,8 @@ test("consolidate armed closes then transfers each funded source", async () => {
   assert.equal(r.status, "in_progress");
   const names = calls.map((c) => c[0]);
   assert.ok(names.includes("close_position"), "should close positions first");
-  assert.ok(names.includes("transfer"), "should transfer funded sources");
-  const xfer = calls.find((c) => c[0] === "transfer");
+  assert.ok(names.includes("withdraw_bridge"), "should bridge funded sources to the withdrawal wallet");
+  const xfer = calls.find((c) => c[0] === "withdraw_bridge");
   assert.equal(xfer?.[1].fromChain, "polygon");
   assert.equal(xfer?.[1].toChain, "solana");
 });

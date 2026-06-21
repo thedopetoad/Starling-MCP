@@ -162,15 +162,27 @@ export async function consolidate(d: CommandDeps, args: Record<string, unknown>)
   }
 
   await closeAll(d, {});
-  const moves: Array<{ from: string; ok: boolean; note?: string }> = [];
+  const moves: Array<{ from: string; ok: boolean; flightId?: unknown; note?: string }> = [];
   for (const s of sources) {
-    const r = await d.run("transfer", { fromChain: s.chain, toChain: to, amount: String(s.usdc), idempotencyKey: d.newKey() });
-    moves.push({ from: s.chain, ok: r.ok !== false && r.error === undefined, note: r.note ?? r.error });
+    // Bridge OUT, delivering straight to the pinned withdrawal wallet on `to`.
+    const r = await d.run("withdraw_bridge", { fromChain: s.chain, toChain: to, amount: String(s.usdc), idempotencyKey: d.newKey() });
+    const okMove = r.ok !== false && r.error === undefined;
+    // Kick the flight along once — deBridge self-delivers; CCTP mints once attested.
+    if (okMove && r.flightId && r.provider) {
+      try { await d.run("advance_bridge", { provider: r.provider, flightId: r.flightId }); } catch { /* advance again later */ }
+    }
+    moves.push({ from: s.chain, ok: okMove, flightId: r.flightId, note: (r.note as string) ?? r.error });
   }
-  return { status: "in_progress",
-    message: `consolidation to ${to} started: positions closed + ${moves.length} cross-chain transfer(s) sent. ` +
-      `Bridges take several minutes; once funds land on ${to}, run "withdraw ${to}" to sweep to ${dest ?? "your address"}.`,
-    moves };
+  const onTarget = pf.wallets.find((w) => w.chain === to && w.usdc > 0.01);
+  const okN = moves.filter((m) => m.ok).length;
+  return {
+    status: okN > 0 || moves.length === 0 ? "in_progress" : "error",
+    message:
+      `consolidate to ${to}: positions closed; broadcast ${okN}/${moves.length} cross-chain withdraw(s) → ${dest ?? "your address"}. ` +
+      `deBridge routes deliver in a few minutes; CCTP routes auto-advance.` +
+      (onTarget ? ` NOTE: ${onTarget.usdc.toFixed(2)} USDC is already on ${to} — that needs a same-chain sweep (not yet wired).` : ""),
+    moves,
+  };
 }
 
 /** The runner plane.ts calls for non-halt/resume actions. */

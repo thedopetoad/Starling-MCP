@@ -81,9 +81,12 @@ export interface TransferResult {
  *  to poll. Does NOT wait for destination delivery — call advanceBridge for that. */
 export async function runTransfer(
   deps: TransferDeps,
-  args: { fromChain: Chain; toChain: Chain; amount: string; provider?: Rail; lane?: CctpLane },
+  args: { fromChain: Chain; toChain: Chain; amount: string; provider?: Rail; lane?: CctpLane; recipient?: string },
 ): Promise<TransferResult> {
-  const recipient = deps.selfAddress(args.toChain);
+  // Default recipient = the user's OWN address on the dest chain (a transfer moves
+  // between the user's wallets). The withdraw path passes an explicit recipient
+  // (the dashboard-pinned withdrawal wallet), already canWithdraw-checked by the caller.
+  const recipient = args.recipient ?? deps.selfAddress(args.toChain);
   if (!recipient) throw new Error(`no loaded signer for destination chain ${args.toChain} (can't pin a recipient)`);
 
   const destNativeGas = await deps.nativeGas(args.toChain).catch(() => 0);

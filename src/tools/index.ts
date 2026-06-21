@@ -690,6 +690,26 @@ export const MONEY_TOOLS = [
     },
   },
   {
+    name: "withdraw_bridge",
+    description:
+      "Withdraw OUT cross-chain: bridge USDC from fromChain and DELIVER it to the dashboard-pinned " +
+      "withdrawal wallet on toChain. Same machinery as transfer (auto rail; executes the source leg; " +
+      "returns a flightId to poll via advance_bridge) but the recipient is the pinned treasury " +
+      "(canWithdraw), never an argument. fromChain must differ from toChain (same-chain is build_withdraw).",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        fromChain: CHAIN_ENUM,
+        toChain: CHAIN_ENUM,
+        amount: { ...STR, description: "Decimal USDC to withdraw." },
+        provider: { ...PROVIDER_ENUM, description: "Omit to auto-pick the rail (recommended)." },
+        lane: { ...LANE_ENUM, description: "CCTP finality lane; default standard." },
+        ...IDEMPOTENCY,
+      },
+      required: ["fromChain", "toChain", "amount", "idempotencyKey"],
+    },
+  },
+  {
     name: "advance_bridge",
     description:
       "Drive a transfer/bridge to completion: poll the flight and, for CCTP, broadcast the mint " +
@@ -1867,6 +1887,52 @@ async function handleTransfer(deps: ToolDeps, a: Args): Promise<ToolText> {
   return ok({ replayed: false, ...res });
 }
 
+async function handleWithdrawBridge(deps: ToolDeps, a: Args): Promise<ToolText> {
+  const fromChain = reqEnum(a, "fromChain", CHAINS) as Chain;
+  const toChain = reqEnum(a, "toChain", CHAINS) as Chain;
+  const amount = reqStr(a, "amount");
+  const provider = optEnum(a, "provider", PROVIDERS);
+  const lane = optEnum(a, "lane", LANES) as CctpLane | undefined;
+  const idempotencyKey = reqStr(a, "idempotencyKey");
+  if (fromChain === toChain) throw new ArgError("fromChain and toChain must differ (same-chain sweep goes through build_withdraw)");
+
+  // The SOURCE chain's signer must be loaded — it signs the burn/order.
+  const guard: Venue = fromChain === "solana" ? "jupiter" : fromChain === "hyperliquid" ? "hyperliquid" : "polymarket";
+  if (!deps.signerLoaded(guard)) {
+    return fail("signer_missing", `no local signer loaded for source chain ${fromChain}; see auth_check`);
+  }
+
+  // Recipient = the pinned WITHDRAWAL wallet on toChain (keystore-sealed or
+  // dashboard-pinned). Never an agent argument; a keystore/dashboard conflict refuses.
+  let recipient: string;
+  try {
+    const treasury = await deps.treasury();
+    const src = chainSource(treasury, toChain);
+    if (src === "conflict") {
+      return fail("treasury_refused", `withdraw destination conflict for ${toChain}: keystore and dashboard pin disagree`, { withdrawCode: "treasury_conflict" });
+    }
+    if (!canWithdraw(src)) {
+      return fail("treasury_refused", `no withdraw destination for ${toChain} — pin one on the dashboard first`, { withdrawCode: "treasury_not_sealed" });
+    }
+    const t = treasury.byChain[toChain];
+    if (!t) return fail("treasury_refused", `no recipient for ${toChain}`, { withdrawCode: "no_treasury_for_chain" });
+    recipient = t;
+  } catch (e) {
+    if (e instanceof WithdrawError) return fail("treasury_refused", e.message, { withdrawCode: e.code });
+    throw e;
+  }
+
+  // Reserve FIRST so a replayed key can NEVER re-broadcast the source money move.
+  const { replayed } = await reserveIntent(deps, idempotencyKey, "bridge");
+  if (replayed) {
+    return ok({ ok: true, replayed: true, kind: "withdraw_bridge", recipient,
+      note: "idempotencyKey already used — the withdraw-bridge source was already broadcast and is NOT re-sent. Poll advance_bridge with the original flightId, or use a NEW key." });
+  }
+  const res = await runTransfer(deps, { fromChain, toChain, amount, provider, lane, recipient });
+  // res already carries `recipient` (the pinned withdrawal wallet).
+  return ok({ replayed: false, kind: "withdraw_bridge", ...res });
+}
+
 async function handleAdvanceBridge(deps: ToolDeps, a: Args): Promise<ToolText> {
   const provider = reqEnum(a, "provider", PROVIDERS);
   const flightId = reqStr(a, "flightId");
@@ -2233,6 +2299,8 @@ export async function handleMoneyTool(name: string, rawArgs: unknown, deps: Tool
         return await handleHlBridgeOut(deps, a);
       case "transfer":
         return await handleTransfer(deps, a);
+      case "withdraw_bridge":
+        return await handleWithdrawBridge(deps, a);
       case "advance_bridge":
         return await handleAdvanceBridge(deps, a);
       case "hl_account":
