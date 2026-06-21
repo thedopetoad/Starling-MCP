@@ -82,6 +82,9 @@ import {
 } from "../policy/limits.js";
 import type { Executor, ExecResult } from "../exec/executor.js";
 import { runTransfer, advanceBridge } from "./transfer.js";
+import { SolanaRpc, associatedTokenAddress } from "../adapters/solana-rpc.js";
+import { buildSolanaSweep } from "../adapters/solana-sweep.js";
+import { USDC_MINT as SOL_USDC_MINT } from "../adapters/jupiter.js";
 
 // ── result helpers ──────────────────────────────────────────────────────────
 // Matches the shape server.ts already returns: { content: [{type:"text", text}] }.
@@ -707,6 +710,19 @@ export const MONEY_TOOLS = [
         ...IDEMPOTENCY,
       },
       required: ["fromChain", "toChain", "amount", "idempotencyKey"],
+    },
+  },
+  {
+    name: "withdraw_local",
+    description:
+      "SAME-CHAIN sweep: send a wallet's full USDC (+ native, minus a small fee/rent reserve) to the " +
+      "dashboard-pinned withdrawal wallet ON THAT SAME CHAIN. Builds + signs + broadcasts locally; the " +
+      "recipient is the pinned treasury (canWithdraw), never an argument. Solana implemented (SPL USDC " +
+      "transfer + SOL transfer, recipient ATA created idempotently); EVM/HL still route via build_withdraw.",
+    inputSchema: {
+      type: "object" as const,
+      properties: { chain: CHAIN_ENUM, ...IDEMPOTENCY },
+      required: ["chain", "idempotencyKey"],
     },
   },
   {
@@ -1933,6 +1949,58 @@ async function handleWithdrawBridge(deps: ToolDeps, a: Args): Promise<ToolText> 
   return ok({ replayed: false, kind: "withdraw_bridge", ...res });
 }
 
+async function handleWithdrawLocal(deps: ToolDeps, a: Args): Promise<ToolText> {
+  const chain = reqEnum(a, "chain", CHAINS) as Chain;
+  const idempotencyKey = reqStr(a, "idempotencyKey");
+  if (chain !== "solana") {
+    return fail("bad_args", `withdraw_local currently supports solana only; use build_withdraw for ${chain}`);
+  }
+  if (!deps.signerLoaded("jupiter")) return fail("signer_missing", "no solana signer loaded; see auth_check");
+  const owner = deps.selfAddress("solana");
+  if (!owner) return fail("signer_missing", "no solana address loaded");
+
+  // Recipient = the pinned withdrawal wallet on solana (canWithdraw); never an arg.
+  let recipient: string;
+  try {
+    const treasury = await deps.treasury();
+    const src = chainSource(treasury, "solana");
+    if (src === "conflict") return fail("treasury_refused", "solana withdraw destination conflict (keystore vs dashboard)", { withdrawCode: "treasury_conflict" });
+    if (!canWithdraw(src)) return fail("treasury_refused", "no solana withdrawal address pinned — set one on the dashboard", { withdrawCode: "treasury_not_sealed" });
+    const t = treasury.byChain.solana;
+    if (!t) return fail("treasury_refused", "no solana recipient", { withdrawCode: "no_treasury_for_chain" });
+    recipient = t;
+  } catch (e) {
+    if (e instanceof WithdrawError) return fail("treasury_refused", e.message, { withdrawCode: e.code });
+    throw e;
+  }
+
+  // Sweep EVERYTHING: full USDC + native SOL minus a small reserve for the tx fee +
+  // the recipient-ATA rent this tx may pay.
+  const rpc = new SolanaRpc();
+  let usdc = 0n;
+  try { usdc = BigInt((await rpc.getTokenAccountBalance(associatedTokenAddress(owner, SOL_USDC_MINT))).amount); } catch { /* no ATA = 0 */ }
+  const lamports = BigInt(await rpc.getBalanceLamports(owner));
+  const RESERVE = 10_000_000n; // 0.01 SOL: fee + ATA rent headroom
+  const solSend = lamports > RESERVE ? lamports - RESERVE : 0n;
+  if (usdc <= 0n && solSend <= 0n) {
+    return ok({ ok: true, chain, note: "nothing to withdraw (wallet empty after the fee/rent reserve)" });
+  }
+
+  const { replayed } = await reserveIntent(deps, idempotencyKey, "withdraw");
+  if (replayed) {
+    return ok({ ok: true, replayed: true, chain, note: "idempotencyKey already used — sweep already broadcast and NOT re-sent. Use a NEW key." });
+  }
+  const plan = buildSolanaSweep({ owner, recipient, usdcBaseUnits: usdc, solLamports: solSend });
+  const exec = await deps.executor.exec({ chain: "solana", kind: "solanaTx", payload: plan.unsignedTxB64, label: "withdraw" });
+  await deps.store.patch(deps.botId, idempotencyKey, { state: exec.ok ? "FILLED" : "FAILED", txHashes: exec.txHash ? [exec.txHash] : [] });
+  return ok({
+    ok: exec.ok, replayed: false, chain, recipient, summary: plan.summary, txHash: exec.txHash, exec,
+    note: exec.ok
+      ? `Swept to ${recipient}: ${plan.summary}. Tx ${exec.txHash}.`
+      : `Sweep failed: ${exec.error ?? "unknown"} (funds not moved; simulate-first means nothing partial broadcast).`,
+  });
+}
+
 async function handleAdvanceBridge(deps: ToolDeps, a: Args): Promise<ToolText> {
   const provider = reqEnum(a, "provider", PROVIDERS);
   const flightId = reqStr(a, "flightId");
@@ -2301,6 +2369,8 @@ export async function handleMoneyTool(name: string, rawArgs: unknown, deps: Tool
         return await handleTransfer(deps, a);
       case "withdraw_bridge":
         return await handleWithdrawBridge(deps, a);
+      case "withdraw_local":
+        return await handleWithdrawLocal(deps, a);
       case "advance_bridge":
         return await handleAdvanceBridge(deps, a);
       case "hl_account":

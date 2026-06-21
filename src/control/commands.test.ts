@@ -156,6 +156,33 @@ test("withdraw armed on polygon resolves+reserves and reports broadcast NOT wire
   assert.match(r.message, /wired/);
 });
 
+test("withdraw solana dry-run describes a USDC+SOL sweep", async () => {
+  const run = makeCommandRunner(deps({
+    portfolio: async () => pf({ wallets: [
+      { chain: "solana", address: "S1", native: { symbol: "SOL", amount: 0.2, usd: 30 }, usdc: 5, valueUsd: 35, partial: false },
+    ] }),
+  }));
+  const r = await run("withdraw", { mode: "per_chain", chain: "solana" });
+  assert.equal(r.status, "ok");
+  assert.equal(r.dryRun, true);
+  assert.match(r.message, /sweep the solana wallet/);
+});
+
+test("withdraw solana armed calls withdraw_local (the executing sweep)", async () => {
+  const calls: Array<[string, Record<string, unknown>]> = [];
+  const run = makeCommandRunner(deps({
+    execute: true, calls,
+    portfolio: async () => pf({ wallets: [
+      { chain: "solana", address: "S1", native: { symbol: "SOL", amount: 0.2, usd: 30 }, usdc: 5, valueUsd: 35, partial: false },
+    ] }),
+  }));
+  const r = await run("withdraw", { mode: "per_chain", chain: "solana" });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], "withdraw_local");
+  assert.equal(calls[0][1].chain, "solana");
+  assert.equal(r.status, "ok");
+});
+
 // ── consolidate ───────────────────────────────────────────────────────────────
 test("consolidate dry-run lists the plan, executes nothing", async () => {
   const calls: Array<[string, Record<string, unknown>]> = [];

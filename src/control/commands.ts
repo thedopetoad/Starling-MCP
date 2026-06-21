@@ -102,35 +102,48 @@ export async function withdrawChain(d: CommandDeps, args: Record<string, unknown
   if (!["polygon", "hyperliquid", "solana"].includes(chain)) {
     return { status: "error", message: `unknown chain ${chain}` };
   }
-  const pf = await d.portfolio();
-  const w = pf.wallets.find((x) => x.chain === chain);
-  const usdc = w ? w.usdc : 0;
   const dest = d.treasury()[chain];
-
   if (chain !== "hyperliquid" && !dest) {
     return { status: "error", message: `no withdraw destination set for ${chain} — pin one on the Wallet States page first` };
   }
+  const pf = await d.portfolio();
+  const w = pf.wallets.find((x) => x.chain === chain);
+  const usdc = w ? w.usdc : 0;
+  const nativeAmt = w?.native?.amount ?? 0;
+
+  // Solana: a REAL same-chain sweep (USDC + SOL) via withdraw_local — executes.
+  if (chain === "solana") {
+    if (usdc <= 0.01 && nativeAmt <= 0.011) {
+      return { status: "ok", message: "nothing to withdraw on solana (empty after the fee/rent reserve)" };
+    }
+    if (!d.execute) {
+      return { status: "ok", dryRun: true,
+        message: `[dry-run] would sweep the solana wallet (~${usdc.toFixed(2)} USDC + ${nativeAmt.toFixed(4)} SOL minus fee) -> ${dest}. ${ARM_HINT}` };
+    }
+    const r = await d.run("withdraw_local", { chain: "solana", idempotencyKey: d.newKey() });
+    return { status: r.ok !== false && r.error === undefined ? "ok" : "error",
+      message: (r.note as string) ?? r.error ?? "solana withdraw submitted", result: r };
+  }
+
+  // Hyperliquid / Polygon via build_withdraw (HL executes to your Arbitrum address;
+  // the EVM same-chain sweep broadcast is the next piece after Solana).
   if (usdc <= 0.01) {
     return { status: "ok", message: `nothing to withdraw on ${chain} (USDC ${usdc.toFixed(2)})` };
   }
   const where = chain === "hyperliquid" ? "your own Arbitrum address (HL native off-ramp)" : dest;
   if (!d.execute) {
     return { status: "ok", dryRun: true,
-      message: `[dry-run] would withdraw ${usdc.toFixed(2)} USDC on ${chain} → ${where}. ${ARM_HINT}` };
+      message: `[dry-run] would withdraw ${usdc.toFixed(2)} USDC on ${chain} -> ${where}. ${ARM_HINT}` };
   }
-
   const r = await d.run("build_withdraw", { chain, amount: String(usdc), idempotencyKey: d.newKey() });
   if (chain === "hyperliquid") {
     return { status: r.ok ? "ok" : "error",
-      message: r.ok ? `HL withdraw submitted: ${usdc.toFixed(2)} USDC → your Arbitrum address (~5 min, $1 fee)`
+      message: r.ok ? `HL withdraw submitted: ${usdc.toFixed(2)} USDC -> your Arbitrum address (~5 min, $1 fee)`
                     : `HL withdraw failed: ${r.error ?? r.note ?? "unknown"}`, result: r };
   }
-  // polygon/solana: build_withdraw resolves the treasury + reserves the intent, but
-  // the on-chain ERC-20/SPL sweep broadcast is NOT wired in this MCP build yet —
-  // report that honestly rather than implying funds moved.
   return { status: "in_progress",
     message: `withdraw on ${chain} resolved to ${dest} and reserved. NOTE: the on-chain ${chain} sweep ` +
-      `broadcast isn't wired in this MCP build yet, so funds have NOT moved. (Tracked for a later release.)`,
+      `broadcast isn't wired yet (solana is; EVM next), so funds have NOT moved.`,
     result: r };
 }
 
