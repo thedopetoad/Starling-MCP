@@ -113,8 +113,8 @@ export async function withdrawChain(d: CommandDeps, args: Record<string, unknown
 
   // Solana: a REAL same-chain sweep (USDC + SOL) via withdraw_local — executes.
   if (chain === "solana") {
-    if (usdc <= 0.01 && nativeAmt <= 0.011) {
-      return { status: "ok", message: "nothing to withdraw on solana (empty after the fee/rent reserve)" };
+    if (usdc < 0.001 && nativeAmt < 0.0002) {
+      return { status: "ok", message: "nothing to withdraw on solana (only unspendable dust below the network fee)" };
     }
     if (!d.execute) {
       return { status: "ok", dryRun: true,
