@@ -54,10 +54,29 @@ export interface WalletState {
   partial: boolean;
 }
 
+/** An open on-chain order (e.g. a Jupiter limit/trigger order). Display-only: its
+ *  escrowed token value is already counted in the wallet's `tokens`, so it is NOT
+ *  added to totals — this list just makes the resting order visible. */
+export interface PortfolioOrder {
+  venue: string;
+  kind: string;
+  orderId: string;
+  description: string;
+  inputSymbol: string;
+  inputMint: string;
+  makingAmount: number;
+  outputSymbol: string;
+  outputMint: string;
+  takingAmount: number;
+  limitPrice: number | null;
+}
+
 export interface Portfolio {
   ts: string;
   wallets: WalletState[];
   positions: PortfolioPosition[];
+  /** Open on-chain orders (e.g. Jupiter limit orders). Informational, not in totals. */
+  orders?: PortfolioOrder[];
   totalValueUsd: number;
   unrealizedPnlUsd: number;
   /** v1 pricing caveat surfaced to the UI. */
@@ -124,10 +143,20 @@ async function jupTokenInfo(mint: string): Promise<{ symbol: string; usdPrice: n
   }
 }
 
-/** Tokens ESCROWED in the user's open Jupiter limit (trigger) orders — they've left
- *  the wallet's token accounts, so we add them back to show true holdings.
- *  makingAmount/inputMint = what's locked. Best-effort -> [] on failure. */
-async function jupOpenOrderHoldings(owner: string): Promise<{ mint: string; amount: number }[]> {
+/** An open Jupiter trigger (limit) order in raw form (UI/decimal amounts). */
+interface RawOrder {
+  orderId: string;
+  inputMint: string;
+  makingAmount: number;
+  outputMint: string;
+  takingAmount: number;
+}
+
+/** The user's open Jupiter limit (trigger) orders. The tokens in these have left the
+ *  wallet's token accounts (escrowed), so callers add makingAmount/inputMint back to
+ *  show true holdings AND surface the orders themselves on the dashboard.
+ *  Best-effort -> [] on failure. */
+async function jupOpenOrders(owner: string): Promise<RawOrder[]> {
   try {
     const res = await timed(
       fetch(`${JUP_TRIGGER_API}/getTriggerOrders?user=${owner}&orderStatus=active`),
@@ -137,11 +166,18 @@ async function jupOpenOrderHoldings(owner: string): Promise<{ mint: string; amou
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const j = (await res.json()) as any;
     const orders = Array.isArray(j?.orders) ? j.orders : Array.isArray(j) ? j : [];
-    const out: { mint: string; amount: number }[] = [];
+    const out: RawOrder[] = [];
     for (const o of orders) {
-      const mint = o?.inputMint;
-      const amount = Number(o?.makingAmount); // lite-api returns UI (decimal) amounts
-      if (mint && amount > 0) out.push({ mint, amount });
+      const inputMint = o?.inputMint;
+      const makingAmount = Number(o?.makingAmount); // lite-api returns UI (decimal) amounts
+      if (!inputMint || !(makingAmount > 0)) continue;
+      out.push({
+        orderId: String(o?.orderKey ?? o?.publicKey ?? o?.account ?? o?.order ?? ""),
+        inputMint,
+        makingAmount,
+        outputMint: String(o?.outputMint ?? ""),
+        takingAmount: Number(o?.takingAmount ?? 0),
+      });
     }
     return out;
   } catch {
@@ -149,7 +185,7 @@ async function jupOpenOrderHoldings(owner: string): Promise<{ mint: string; amou
   }
 }
 
-async function readSolana(address: string): Promise<WalletState> {
+async function readSolana(address: string, openOrders: RawOrder[]): Promise<WalletState> {
   const rpc = new SolanaRpc();
   let sol = 0,
     partial = false;
@@ -183,7 +219,7 @@ async function readSolana(address: string): Promise<WalletState> {
   }
 
   // Tokens escrowed in open Jupiter orders (left the wallet but still ours).
-  const orderHoldings = await jupOpenOrderHoldings(address);
+  const orderHoldings = openOrders.map((o) => ({ mint: o.inputMint, amount: o.makingAmount }));
 
   const usdc = walletTokens.filter((t) => t.mint === USDC_MINT).reduce((s, t) => s + t.uiAmount, 0);
 
@@ -321,8 +357,12 @@ export async function readPortfolio(addrs: Addrs, network: string): Promise<Port
   const wallets: WalletState[] = [];
   const positions: PortfolioPosition[] = [];
 
+  // Open Jupiter limit orders (Solana), fetched once: feeds the escrowed-token
+  // valuation in readSolana AND the standalone orders list below.
+  const solOrders = addrs.solana ? await jupOpenOrders(addrs.solana) : [];
+
   const jobs: Promise<void>[] = [];
-  if (addrs.solana) jobs.push(readSolana(addrs.solana).then((w) => void wallets.push(w)));
+  if (addrs.solana) jobs.push(readSolana(addrs.solana, solOrders).then((w) => void wallets.push(w)));
   if (addrs.polygon) jobs.push(readPolygon(addrs.polygon).then((w) => void wallets.push(w)));
   if (addrs.hyperliquid)
     jobs.push(
@@ -353,10 +393,33 @@ export async function readPortfolio(addrs: Addrs, network: string): Promise<Port
   const unrealizedPnlUsd = positions.reduce((s, p) => s + p.unrealizedPnlUsd, 0);
   const partial = wallets.some((w) => w.partial);
 
+  // Enrich open orders for display (symbols + limit price). Their escrowed value is
+  // already counted in the wallets' tokens, so this list is informational only.
+  const orders: PortfolioOrder[] = [];
+  for (const o of solOrders) {
+    const inSym = o.inputMint === USDC_MINT ? "USDC" : (await jupTokenInfo(o.inputMint))?.symbol || o.inputMint.slice(0, 4);
+    const outSym = o.outputMint === USDC_MINT ? "USDC" : (await jupTokenInfo(o.outputMint))?.symbol || (o.outputMint ? o.outputMint.slice(0, 4) : "?");
+    const limitPrice = o.makingAmount > 0 ? o.takingAmount / o.makingAmount : null;
+    orders.push({
+      venue: "jupiter",
+      kind: "limit",
+      orderId: o.orderId,
+      description: `SELL ${o.makingAmount} ${inSym} -> ${o.takingAmount} ${outSym}`,
+      inputSymbol: inSym,
+      inputMint: o.inputMint,
+      makingAmount: o.makingAmount,
+      outputSymbol: outSym,
+      outputMint: o.outputMint,
+      takingAmount: o.takingAmount,
+      limitPrice,
+    });
+  }
+
   return {
     ts: new Date().toISOString(),
     wallets,
     positions,
+    orders,
     totalValueUsd,
     unrealizedPnlUsd,
     pricingNote: priced
