@@ -18,6 +18,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { readFile, writeFile, rename, mkdir, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { starlingDir } from "../keystore/store.js";
+import type { CommandRunner } from "./commands.js";
 
 const log = (m: string) => process.stderr.write(`[starling] ${m}\n`);
 const now = () => new Date().toISOString();
@@ -105,8 +106,11 @@ export async function writeStatus(snapshot: unknown): Promise<void> {
 
 // ── command drain (dashboard -> here -> dashboard) ────────────────────────────
 /** Process any new dashboard commands and write their acks. Idempotent: a command
- *  with an existing ack is skipped. Safe to call on every heartbeat tick. */
-export async function drainControl(): Promise<void> {
+ *  with an existing ack is skipped. Safe to call on every heartbeat tick.
+ *  halt/resume are handled here (just flag the kill-switch); the money actions
+ *  (close_all / withdraw / consolidate) are delegated to `run` when provided —
+ *  server.ts injects a runner bound to the real deps + the dry-run/execute gate. */
+export async function drainControl(run?: CommandRunner): Promise<void> {
   const dir = controlDir();
   let entries: string[];
   try {
@@ -134,18 +138,16 @@ export async function drainControl(): Promise<void> {
       await clearHalt();
       ack = { id, action, status: "ok", message: "trading resumed", ts: now() };
     } else if (action === "close_all" || action === "withdraw") {
-      // Honest placeholder: these move real money through execution paths that
-      // still need testnet validation, so we don't auto-run them from a file yet.
-      ack = {
-        id,
-        action,
-        status: "error",
-        code: "unsupported_on_this_build",
-        message:
-          `${action} from the dashboard isn't enabled on this MCP build yet. ` +
-          `Halt works now; ${action} lands after the execution paths are validated on testnet.`,
-        ts: now(),
-      };
+      if (!run) {
+        ack = {
+          id, action, status: "error", code: "no_runner",
+          message: `${action} can't run: no command runner wired (the MCP didn't start with deps).`,
+          ts: now(),
+        };
+      } else {
+        const r = await run(action, (cmd?.args as Record<string, unknown>) ?? {});
+        ack = { id, action, ...r, ts: now() };
+      }
     } else {
       ack = { id, action: action ?? null, status: "error", message: `unknown action ${String(action)}`, ts: now() };
     }

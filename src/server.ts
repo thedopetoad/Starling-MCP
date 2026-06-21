@@ -56,6 +56,8 @@ import {
   isHaltBlocked,
 } from "./control/plane.js";
 import { readPortfolio, type Portfolio } from "./control/portfolio.js";
+import { makeCommandRunner, type CommandRunner, type ToolResult } from "./control/commands.js";
+import { randomUUID } from "node:crypto";
 
 const log = (m: string) => process.stderr.write(`[starling] ${m}\n`);
 const text = (obj: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(obj, null, 2) }] });
@@ -409,6 +411,38 @@ export async function startServer(): Promise<void> {
   // gate itself is enforced in the request handler above; here we only publish
   // state + obey halt/resume + ack commands. unref() so this timer never keeps the
   // process alive on its own.
+  // Runner for the dashboard's money commands (close_all / withdraw / consolidate).
+  // DRY-RUN unless STARLING_DASHBOARD_EXECUTE=true — a queued command can't fire a
+  // real mainnet move until the operator arms it. It drives the SAME tool handlers
+  // the agent uses, so all the per-tool guardrails (signer-gating, idempotency,
+  // treasury resolution, risk caps) still apply.
+  const network = process.env.STARLING_NETWORK ?? "testnet";
+  const dashExecute = (process.env.STARLING_DASHBOARD_EXECUTE ?? "").toLowerCase() === "true";
+  const runMoneyTool = async (name: string, args: Record<string, unknown>): Promise<ToolResult> => {
+    const res = await handleMoneyTool(name, args, deps);
+    try {
+      return JSON.parse(res.content?.[0]?.text ?? "{}") as ToolResult;
+    } catch {
+      return { ok: false, error: "unparseable tool result" };
+    }
+  };
+  const treasuryMap = (): Partial<Record<Chain, string>> => {
+    const out: Partial<Record<Chain, string>> = {};
+    const by = (cachedWithdrawDests?.byChain ?? {}) as Record<string, { address?: string }>;
+    for (const c of ["polygon", "hyperliquid", "solana"] as const) {
+      if (by[c]?.address) out[c] = by[c].address;
+    }
+    return out;
+  };
+  const commandRunner: CommandRunner = makeCommandRunner({
+    execute: dashExecute,
+    portfolio: () => readPortfolio(loadedAddresses(), network),
+    treasury: treasuryMap,
+    run: runMoneyTool,
+    newKey: () => `dash_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`,
+  });
+  if (dashExecute) log("dashboard money commands are ARMED (STARLING_DASHBOARD_EXECUTE=true) — close/withdraw will EXECUTE");
+
   const controlTick = async () => {
     try {
       await writeStatus({
@@ -421,7 +455,7 @@ export async function startServer(): Promise<void> {
       log(`status publish failed: ${(e as Error).message}`);
     }
     try {
-      await drainControl();
+      await drainControl(commandRunner);
     } catch (e) {
       log(`control drain failed: ${(e as Error).message}`);
     }
@@ -484,6 +518,8 @@ function statusSnapshot() {
     network: process.env.STARLING_NETWORK ?? "testnet",
     keySource: activeKeySource(),
     tradingEnabled: !halted,
+    // Whether dashboard money commands (close/withdraw) will EXECUTE vs dry-run.
+    executeArmed: (process.env.STARLING_DASHBOARD_EXECUTE ?? "").toLowerCase() === "true",
     haltReason: haltActive() ? (haltInfo()?.reason ?? "manual") : envKill ? "kill_switch_env" : null,
     venues: Object.fromEntries(
       chains.map((c) => [c, { signerLoaded: !!addrs[c], address: addrs[c] ?? null }]),
