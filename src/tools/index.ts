@@ -1980,8 +1980,17 @@ async function handleWithdrawLocal(deps: ToolDeps, a: Args): Promise<ToolText> {
   let usdc = 0n;
   try { usdc = BigInt((await rpc.getTokenAccountBalance(associatedTokenAddress(owner, SOL_USDC_MINT))).amount); } catch { /* no ATA = 0 */ }
   const lamports = BigInt(await rpc.getBalanceLamports(owner));
-  const RESERVE = 10_000_000n; // 0.01 SOL: fee + ATA rent headroom
-  const solSend = lamports > RESERVE ? lamports - RESERVE : 0n;
+  // What must stay back, and nothing more:
+  //  - the system account's RENT-EXEMPT MINIMUM (~0.00089 SOL): Solana refuses to
+  //    leave an account BELOW it (InsufficientFundsForRent) unless it goes to exactly
+  //    zero, so we keep this floor and leave the account alive + usable;
+  //  - the tx fee (~5k lamports), with a little slack;
+  //  - the dest USDC-ATA rent (~0.00204 SOL) ONLY when a USDC transfer creates it.
+  const RENT_EXEMPT_MIN = 890_880n; // 0-data system account rent-exempt minimum
+  const FEE_BUFFER = 20_000n;       // base fee + slack
+  const ATA_RENT = 2_100_000n;      // only if a USDC transfer creates the dest ATA
+  const reserve = RENT_EXEMPT_MIN + FEE_BUFFER + (usdc > 0n ? ATA_RENT : 0n);
+  const solSend = lamports > reserve ? lamports - reserve : 0n;
   if (usdc <= 0n && solSend <= 0n) {
     return ok({ ok: true, chain, note: "nothing to withdraw (wallet empty after the fee/rent reserve)" });
   }
