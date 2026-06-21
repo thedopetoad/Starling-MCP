@@ -4,6 +4,41 @@
 // public — fine for a small self-test; swap in a paid RPC for production volume).
 export const SOLANA_MAINNET_RPC = "https://api.mainnet-beta.solana.com";
 
+import { base58 } from "@scure/base";
+import { sha256 } from "@noble/hashes/sha256";
+import { ed25519 } from "@noble/curves/ed25519";
+
+const TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+const ATA_PROGRAM = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
+const PDA_MARKER = new TextEncoder().encode("ProgramDerivedAddress");
+// @noble exposes the curve point as ExtendedPoint (older) or Point (newer).
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const _Point: any = (ed25519 as any).ExtendedPoint ?? (ed25519 as any).Point;
+
+function _isOnCurve(bytes: Uint8Array): boolean {
+  try { _Point.fromHex(bytes); return true; } catch { return false; }
+}
+function _cat(...arrs: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(arrs.reduce((s, a) => s + a.length, 0));
+  let o = 0;
+  for (const a of arrs) { out.set(a, o); o += a.length; }
+  return out;
+}
+
+/** Derive the SPL associated token account for (owner, mint) — pure, keyless,
+ *  matches @solana/spl-token's getAssociatedTokenAddress. Lets us read a token
+ *  balance via the LIGHT getTokenAccountBalance(ata) instead of the heavy
+ *  getTokenAccountsByOwner that public RPCs rate-limit. */
+export function associatedTokenAddress(owner: string, mint: string): string {
+  const seeds = [base58.decode(owner), base58.decode(TOKEN_PROGRAM), base58.decode(mint)];
+  const prog = base58.decode(ATA_PROGRAM);
+  for (let bump = 255; bump >= 0; bump--) {
+    const h = sha256(_cat(...seeds, new Uint8Array([bump]), prog, PDA_MARKER));
+    if (!_isOnCurve(h)) return base58.encode(h);
+  }
+  throw new Error("no off-curve bump for ATA");
+}
+
 export interface LatestBlockhash {
   blockhash: string;
   lastValidBlockHeight: number;
@@ -64,6 +99,17 @@ export class SolanaRpc {
     const acct = r?.value?.[0]?.account?.data?.parsed?.info?.tokenAmount;
     if (!acct) return null;
     return { amount: acct.amount, decimals: acct.decimals, uiAmount: acct.uiAmount };
+  }
+
+  /** Balance of a SPECIFIC token account (e.g. an ATA) — a much lighter call than
+   *  getTokenAccountsByOwner, so public RPCs serve it reliably. THROWS if the
+   *  account doesn't exist ("could not find account"); callers treat that as 0. */
+  async getTokenAccountBalance(account: string): Promise<{ amount: string; decimals: number; uiAmount: number }> {
+    const r = await this.call<{ value: { amount: string; decimals: number; uiAmount: number } }>(
+      "getTokenAccountBalance",
+      [account, { commitment: "confirmed" }],
+    );
+    return r.value;
   }
 
   /** Mint decimals (+ total supply) for ANY mint — on-chain truth, works even when
