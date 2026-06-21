@@ -202,6 +202,20 @@ async function readHyperliquid(
   };
 }
 
+/** Spot USD prices for native gas tokens (CoinGecko, no key). Best-effort: returns
+ *  nulls on failure so the portfolio still renders (just without native USD). */
+async function nativePrices(): Promise<{ SOL: number | null; MATIC: number | null }> {
+  try {
+    const url = "https://api.coingecko.com/api/v3/simple/price?ids=solana,matic-network&vs_currencies=usd";
+    const res = await timed(fetch(url, { headers: { "User-Agent": "starling-dashboard" } }), "native prices");
+    if (!res.ok) return { SOL: null, MATIC: null };
+    const j = (await res.json()) as Record<string, { usd?: number }>;
+    return { SOL: j.solana?.usd ?? null, MATIC: j["matic-network"]?.usd ?? null };
+  } catch {
+    return { SOL: null, MATIC: null };
+  }
+}
+
 /**
  * Read the full portfolio for the loaded addresses. `network` selects the HL info
  * host (EVM/Solana RPC use their mainnet defaults). Best-effort: never throws.
@@ -221,7 +235,19 @@ export async function readPortfolio(addrs: Addrs, network: string): Promise<Port
         positions.push(...r.positions);
       }),
     );
-  await Promise.all(jobs);
+  const [prices] = await Promise.all([nativePrices(), Promise.all(jobs)]);
+
+  // Price the native gas tokens (SOL/MATIC) into each wallet's USD value.
+  let priced = true;
+  for (const w of wallets) {
+    const px = w.native.symbol === "SOL" ? prices.SOL : w.native.symbol === "MATIC" ? prices.MATIC : null;
+    if (px != null && w.native.amount > 0) {
+      w.native.usd = w.native.amount * px;
+      w.valueUsd += w.native.usd;
+    } else if (px == null && w.native.amount > 0 && w.native.symbol !== "USDC") {
+      priced = false; // had native to value but no price
+    }
+  }
 
   // Stable chain order for the UI.
   const order: Chain[] = ["solana", "polygon", "hyperliquid"];
@@ -237,7 +263,9 @@ export async function readPortfolio(addrs: Addrs, network: string): Promise<Port
     positions,
     totalValueUsd,
     unrealizedPnlUsd,
-    pricingNote: "USDC=$1, HL=accountValue USD; native SOL/MATIC unpriced (gas); PM/Jupiter positions WIP",
+    pricingNote: priced
+      ? "USDC=$1; native SOL/MATIC priced via CoinGecko; HL=accountValue. PM/Jupiter positions WIP"
+      : "USDC=$1; HL=accountValue; native price unavailable this tick. PM/Jupiter positions WIP",
     partial,
   };
 }
