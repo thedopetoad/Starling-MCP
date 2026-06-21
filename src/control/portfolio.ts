@@ -12,7 +12,7 @@
 //   - Positions: Hyperliquid perps (enumerable via clearinghouseState). Polymarket
 //     and Jupiter positions need per-market ids to enumerate and are deferred.
 import { EvmRpc } from "../adapters/evm-rpc.js";
-import { SolanaRpc } from "../adapters/solana-rpc.js";
+import { SolanaRpc, associatedTokenAddress } from "../adapters/solana-rpc.js";
 import { USDC_MINT } from "../adapters/jupiter.js";
 import { usdcOn } from "../bridge/debridge.js";
 import { infoPost, HL_MAINNET, HL_TESTNET } from "../adapters/hl-transport.js";
@@ -58,7 +58,8 @@ type Addrs = Partial<Record<Chain, string>>;
 /** Per-read timeout so one stalled endpoint (the public Solana RPC is notorious)
  *  can't hang the whole refresh. Rejects after `ms` so the caller's catch marks
  *  the wallet partial and moves on. */
-const READ_TIMEOUT_MS = 8_000;
+const READ_TIMEOUT_MS = 6_000;
+const READ_ATTEMPTS = 3; // public RPCs (esp. Solana) rate-limit intermittently
 function timed<T>(p: Promise<T>, label: string): Promise<T> {
   return Promise.race([
     p,
@@ -66,6 +67,21 @@ function timed<T>(p: Promise<T>, label: string): Promise<T> {
       setTimeout(() => rej(new Error(`${label} timed out after ${READ_TIMEOUT_MS}ms`)), READ_TIMEOUT_MS).unref(),
     ),
   ]);
+}
+
+/** Retry a read a few times — `make` is a thunk so each attempt is a fresh call.
+ *  Lets a flaky/rate-limited public RPC succeed within one poll instead of going
+ *  `partial`. Throws the last error only after all attempts fail. */
+async function timedRetry<T>(make: () => Promise<T>, label: string, attempts = READ_ATTEMPTS): Promise<T> {
+  let last: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await timed(make(), label);
+    } catch (e) {
+      last = e;
+    }
+  }
+  throw last instanceof Error ? last : new Error(`${label} failed`);
 }
 
 /** erc20 balanceOf(owner) via eth_call; returns decimal token units. 0 on error. */
@@ -82,15 +98,20 @@ async function readSolana(address: string): Promise<WalletState> {
     usdc = 0,
     partial = false;
   try {
-    sol = Number(await timed(rpc.getBalanceLamports(address), "sol getBalance")) / 1e9;
+    sol = Number(await timedRetry(() => rpc.getBalanceLamports(address), "sol getBalance")) / 1e9;
   } catch {
     partial = true;
   }
   try {
-    const t = await timed(rpc.getTokenBalance(address, USDC_MINT), "sol USDC");
+    // Light path: read the specific associated token account, not the heavy
+    // getTokenAccountsByOwner (public RPCs rate-limit the latter hard).
+    const ata = associatedTokenAddress(address, USDC_MINT);
+    const t = await timedRetry(() => rpc.getTokenAccountBalance(ata), "sol USDC");
     usdc = t?.uiAmount ?? 0;
-  } catch {
-    partial = true;
+  } catch (e) {
+    // A missing ATA just means zero USDC — not a read failure, so don't flag partial.
+    if (/find account|could not find|account.*not.*exist/i.test(String((e as Error)?.message))) usdc = 0;
+    else partial = true;
   }
   return {
     chain: "solana",
@@ -108,12 +129,12 @@ async function readPolygon(address: string): Promise<WalletState> {
     usdc = 0,
     partial = false;
   try {
-    matic = Number(await timed(rpc.getBalanceWei(address), "polygon native")) / 1e18;
+    matic = Number(await timedRetry(() => rpc.getBalanceWei(address), "polygon native")) / 1e18;
   } catch {
     partial = true;
   }
   try {
-    usdc = await timed(erc20Balance(rpc, usdcOn("polygon"), address, 6), "polygon USDC");
+    usdc = await timedRetry(() => erc20Balance(rpc, usdcOn("polygon"), address, 6), "polygon USDC");
   } catch {
     partial = true;
   }
@@ -139,7 +160,7 @@ async function readHyperliquid(
   const positions: PortfolioPosition[] = [];
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const cs = await timed(infoPost<any>({ type: "clearinghouseState", user: address }, { host }), "hl perp");
+    const cs = await timedRetry(() => infoPost<any>({ type: "clearinghouseState", user: address }, { host }), "hl perp");
     accountValue = Number(cs?.marginSummary?.accountValue ?? 0);
     for (const ap of cs?.assetPositions ?? []) {
       const p = ap?.position;
@@ -162,7 +183,7 @@ async function readHyperliquid(
   }
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const ss = await timed(infoPost<any>({ type: "spotClearinghouseState", user: address }, { host }), "hl spot");
+    const ss = await timedRetry(() => infoPost<any>({ type: "spotClearinghouseState", user: address }, { host }), "hl spot");
     const b = (ss?.balances ?? []).find((x: { coin?: string }) => String(x?.coin).toUpperCase() === "USDC");
     spotUsdc = Number(b?.total ?? 0);
   } catch {
