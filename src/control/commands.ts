@@ -13,7 +13,7 @@
 // unit-tested with no network — see commands.test.ts.
 import type { Portfolio } from "./portfolio.js";
 import type { Chain } from "../adapters/types.js";
-import { murmurNav, murmurDeploy, murmurClose, murmurCashout } from "./murmur.js";
+import { murmurNav, murmurDeploy, murmurClose, murmurCashout, murmurOpen } from "./murmur.js";
 
 /** Parsed result of a tool call (handleMoneyTool's JSON), or a fake in tests. */
 export interface ToolResult {
@@ -213,6 +213,7 @@ export function makeCommandRunner(d: CommandDeps): CommandRunner {
       if (action === "murmur_deploy") return await murmurDeploy(d, args);
       if (action === "murmur_close") return await murmurClose(d, args);
       if (action === "murmur_cashout") return await murmurCashout(d, args);
+      if (action === "murmur_open") return await murmurOpen(d, args);
       return { status: "error", message: `unsupported action ${action}` };
     } catch (e) {
       return { status: "error", message: (e as Error)?.message ?? "command failed" };

@@ -143,7 +143,8 @@ export async function drainControl(run?: CommandRunner): Promise<void> {
       action === "murmur_nav" ||
       action === "murmur_deploy" ||
       action === "murmur_close" ||
-      action === "murmur_cashout"
+      action === "murmur_cashout" ||
+      action === "murmur_open"
     ) {
       if (!run) {
         ack = {

@@ -22,7 +22,7 @@ import { loadedAddresses } from "../signers/index.js";
 import { EvmRpc } from "../adapters/evm-rpc.js";
 import { deriveDepositWalletUUPS } from "../adapters/polymarket-deposit-wallet.js";
 import { fetchPositions, type DataApiPosition } from "../adapters/polymarket-transport.js";
-import { PUSD, USDC_NATIVE } from "../adapters/polymarket-constants.js";
+import { PUSD, USDC_NATIVE, CLOB_HOST } from "../adapters/polymarket-constants.js";
 import { encodeFunctionData, decodeFunctionResult, erc20Abi, type Hex } from "viem";
 
 const SLIP = 0.02; // 2% protective bound on every order
@@ -236,4 +236,40 @@ export async function murmurCashout(d: CommandDeps, args: Record<string, unknown
     }
   }
   return { status: "error", message: `cashout failed: ${r.error ?? r.note ?? "unknown"}`, cashedOutUsdc: "0" };
+}
+
+// ── murmur_open ─────────────────────────────────────────────────────────────────
+// Open (or add to) a specific Polymarket position with N pUSD of collateral.
+// This is the admin/seed path — the LLM normally PICKS markets through the poi
+// gate; this lets the operator deterministically direct pool capital into a
+// market (e.g. to seed a drill or rebalance). Fetches the live ask for a bounded
+// worst price. DRY-RUN unless armed.
+export async function murmurOpen(d: CommandDeps, args: Record<string, unknown>): Promise<CommandResult> {
+  const tokenId = String(args.marketId ?? "").replace(/^pm:/, "");
+  const amountBase = BigInt(String(args.amountUsdc ?? "0"));
+  if (!tokenId || amountBase <= 0n) return { status: "error", message: "need marketId + amountUsdc>0" };
+  const amount = fromBase(amountBase).toFixed(6);
+
+  let price = 0;
+  try {
+    const res = await fetch(`${CLOB_HOST}/price?token_id=${encodeURIComponent(tokenId)}&side=buy`);
+    const j = (await res.json()) as { price?: string | number };
+    price = Number(j.price ?? 0);
+  } catch { /* leave price 0 -> error below */ }
+  if (!(price > 0 && price < 1)) return { status: "error", message: `could not fetch a valid ask for ${tokenId} (got ${price})` };
+  const worst = Math.min(0.999, price * (1 + SLIP)).toFixed(4);
+
+  if (!d.execute) {
+    return { status: "ok", dryRun: true, message: `[dry-run] would open $${amount} in pm:${tokenId} at ~${price} (worst ${worst}). ${ARM}` };
+  }
+  const r = await d.run("open_position", {
+    venue: "polymarket", marketId: `pm:${tokenId}`, side: "buy",
+    amount, amountKind: "collateral", worstPrice: worst, slippageFrac: SLIP, idempotencyKey: d.newKey(),
+  });
+  const ok = r.ok !== false && r.error === undefined && r.state !== "FAILED";
+  return {
+    status: ok ? "ok" : "error",
+    message: ok ? `opened $${amount} in pm:${tokenId} at worst ${worst}` : `open failed: ${r.error ?? r.note ?? "unknown"}`,
+    marketId: `pm:${tokenId}`, notionalUsd: r.notionalUsd, txState: r.state,
+  };
 }
