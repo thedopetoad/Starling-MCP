@@ -206,12 +206,34 @@ export async function murmurCashout(d: CommandDeps, args: Record<string, unknown
     return { status: "ok", dryRun: true, cashedOutUsdc: "0",
       message: `[dry-run] would pm_withdraw $${amount} pUSD→USDC to the pinned treasury (operator). ${ARM}` };
   }
+  // Snapshot the deposit wallet's pUSD before, so we can reconcile a relayer
+  // false-negative (waitMined timing out while the transfer actually lands).
+  const eoa = loadedAddresses().polygon;
+  const dw = eoa ? deriveDepositWalletUUPS(eoa as Hex) : null;
+  const rpc = new EvmRpc({ net: "polygon" });
+  const before = dw ? await erc20Bal(rpc, PUSD, dw) : 0n;
+
   const r = await d.run("pm_withdraw", { toChain: "polygon", amount, idempotencyKey: d.newKey() });
-  const ok = r.ok !== false && r.error === undefined;
-  return {
-    status: ok ? "ok" : "error",
-    message: ok ? `cashed out $${amount} to the operator treasury` : `cashout failed: ${r.error ?? r.note ?? "unknown"}`,
-    cashedOutUsdc: ok ? amountBase.toString() : "0",
-    txHash: r.txHash as string | undefined,
-  };
+  if (r.ok !== false && r.error === undefined) {
+    return { status: "ok", message: `cashed out $${amount} to the operator treasury`, cashedOutUsdc: amountBase.toString(), txHash: r.txHash as string | undefined };
+  }
+
+  // Relayer reported failure — VERIFY on-chain before trusting it. The gasless
+  // relayer's waitMined often times out though the pUSD transfer mined; poll the
+  // dw balance and treat a real ~`amount` drop as success (no double-cashout).
+  if (dw) {
+    for (let i = 0; i < 12; i++) {
+      await new Promise((res) => setTimeout(res, 5000));
+      const after = await erc20Bal(rpc, PUSD, dw);
+      if (before - after >= (amountBase * 99n) / 100n) {
+        return {
+          status: "ok",
+          message: `relayer reported '${r.error ?? r.note}' but the deposit wallet pUSD dropped $${fromBase(before - after).toFixed(2)} on-chain — cashout LANDED`,
+          cashedOutUsdc: amountBase.toString(),
+          reconciled: true,
+        };
+      }
+    }
+  }
+  return { status: "error", message: `cashout failed: ${r.error ?? r.note ?? "unknown"}`, cashedOutUsdc: "0" };
 }
