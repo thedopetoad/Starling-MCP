@@ -137,7 +137,13 @@ export async function drainControl(run?: CommandRunner): Promise<void> {
     } else if (action === "resume") {
       await clearHalt();
       ack = { id, action, status: "ok", message: "trading resumed", ts: now() };
-    } else if (action === "close_all" || action === "withdraw") {
+    } else if (
+      action === "close_all" ||
+      action === "withdraw" ||
+      action === "murmur_nav" ||
+      action === "murmur_deploy" ||
+      action === "murmur_close"
+    ) {
       if (!run) {
         ack = {
           id, action, status: "error", code: "no_runner",
