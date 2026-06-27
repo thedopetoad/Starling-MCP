@@ -190,3 +190,28 @@ export async function murmurClose(d: CommandDeps, args: Record<string, unknown>)
     legs, residual,
   };
 }
+
+// ── murmur_cashout ──────────────────────────────────────────────────────────────
+// Bring realized pUSD → USDC to the OPERATOR so it can pay the user. Uses the
+// native PM bridge (pm_withdraw), whose recipient is the SEALED TREASURY — pin
+// the polygon treasury to the operator wallet. This is the security chokepoint:
+// the trading key can only ever send funds to the pinned operator, never an
+// arbitrary address. The operator (the runner) then transfers the payout to the
+// user. DRY-RUN unless armed.
+export async function murmurCashout(d: CommandDeps, args: Record<string, unknown>): Promise<CommandResult> {
+  const amountBase = BigInt(String(args.amountUsdc ?? "0"));
+  if (amountBase <= 0n) return { status: "ok", message: "nothing to cash out", cashedOutUsdc: "0" };
+  const amount = fromBase(amountBase).toFixed(6);
+  if (!d.execute) {
+    return { status: "ok", dryRun: true, cashedOutUsdc: "0",
+      message: `[dry-run] would pm_withdraw $${amount} pUSD→USDC to the pinned treasury (operator). ${ARM}` };
+  }
+  const r = await d.run("pm_withdraw", { toChain: "polygon", amount, idempotencyKey: d.newKey() });
+  const ok = r.ok !== false && r.error === undefined;
+  return {
+    status: ok ? "ok" : "error",
+    message: ok ? `cashed out $${amount} to the operator treasury` : `cashout failed: ${r.error ?? r.note ?? "unknown"}`,
+    cashedOutUsdc: ok ? amountBase.toString() : "0",
+    txHash: r.txHash as string | undefined,
+  };
+}
