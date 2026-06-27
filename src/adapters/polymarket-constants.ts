@@ -84,7 +84,16 @@ export const USDC_SWAP_FEE = 100 as const;
  */
 export const EIP712_DOMAIN_VERSION = "2" as const;
 export const EIP712_DOMAIN_NAME = "Polymarket CTF Exchange" as const;
-export const EIP712_DOMAIN_NAME_NEGRISK = "Polymarket Neg Risk CTF Exchange" as const;
+// NOTE (2026-06-21): the V2 Neg Risk CTF Exchange uses the SAME EIP-712 domain
+// NAME as the regular exchange ("Polymarket CTF Exchange") — ONLY the
+// verifyingContract address differs (NEG_RISK_CTF_EXCHANGE_V2). Verified two ways:
+//  (1) @polymarket/clob-client-v2 hashes one CTF_EXCHANGE_V2_DOMAIN_NAME constant
+//      for both paths; only exchangeV2 vs negRiskExchangeV2 swaps.
+//  (2) LIVE: a neg-risk POLY_1271 order signed under "Polymarket Neg Risk CTF
+//      Exchange" was rejected ("invalid POLY_1271 signature: signature does not
+//      match order hash"); the same order under this name validates + fills.
+// Do NOT "restore" the descriptive name — it breaks neg-risk order signing.
+export const EIP712_DOMAIN_NAME_NEGRISK = "Polymarket CTF Exchange" as const;
 
 /** CLOB HTTP base. POST /order, GET /tick-size, GET /neg-risk.
  *  Source: C:/Users/will/Desktop/Polymarket/src/app/api/polymarket/order/route.ts */
