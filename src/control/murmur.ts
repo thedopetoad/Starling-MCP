@@ -20,7 +20,7 @@
 import type { CommandDeps, CommandResult } from "./commands.js";
 import { loadedAddresses } from "../signers/index.js";
 import { EvmRpc } from "../adapters/evm-rpc.js";
-import { deriveDepositWalletUUPS } from "../adapters/polymarket-deposit-wallet.js";
+import { resolveDepositWallet } from "../adapters/polymarket-deposit-wallet.js";
 import { fetchPositions, type DataApiPosition } from "../adapters/polymarket-transport.js";
 import { PUSD, USDC_NATIVE, CLOB_HOST } from "../adapters/polymarket-constants.js";
 import { encodeFunctionData, decodeFunctionResult, erc20Abi, type Hex } from "viem";
@@ -54,8 +54,8 @@ interface Book {
 async function readBook(): Promise<Book> {
   const eoa = loadedAddresses().polygon;
   if (!eoa) throw new Error("no polygon signer loaded — cannot read the pool book");
-  const depositWallet = deriveDepositWalletUUPS(eoa as Hex);
   const rpc = new EvmRpc({ net: "polygon" });
+  const depositWallet = await resolveDepositWallet(eoa as Hex, rpc);
   const all = await fetchPositions(depositWallet);
   const positions = all.filter((p) => !p.redeemable && Math.abs(p.size) > 0);
   const [idlePusd, looseUsdc] = await Promise.all([
@@ -209,8 +209,8 @@ export async function murmurCashout(d: CommandDeps, args: Record<string, unknown
   // Snapshot the deposit wallet's pUSD before, so we can reconcile a relayer
   // false-negative (waitMined timing out while the transfer actually lands).
   const eoa = loadedAddresses().polygon;
-  const dw = eoa ? deriveDepositWalletUUPS(eoa as Hex) : null;
   const rpc = new EvmRpc({ net: "polygon" });
+  const dw = eoa ? await resolveDepositWallet(eoa as Hex, rpc) : null;
   const before = dw ? await erc20Bal(rpc, PUSD, dw) : 0n;
 
   const r = await d.run("pm_withdraw", { toChain: "polygon", amount, idempotencyKey: d.newKey() });

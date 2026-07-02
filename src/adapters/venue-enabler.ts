@@ -20,7 +20,7 @@ import type { UnsignedBridgeTx } from "../bridge/types.js";
 import type { VenueEnabler } from "../tools/index.js";
 import { buildEnableTradingTxs, buildWrapTxs, buildNativeToUsdceSwapTxs } from "./polymarket-enable.js";
 import { loadedAddresses, getEvmSigner } from "../signers/index.js";
-import { deriveDepositWalletUUPS } from "./polymarket-deposit-wallet.js";
+import { resolveDepositWallet } from "./polymarket-deposit-wallet.js";
 import { PolymarketRelayer, builderCredsFromEnv, buildApprovalCalls, PUSD } from "./polymarket-relayer.js";
 import { CTF_EXCHANGE_V2, USDC_E, USDC_NATIVE, COLLATERAL_ONRAMP, COLLATERAL_DECIMALS } from "./polymarket-constants.js";
 import { EvmRpc } from "./evm-rpc.js";
@@ -140,9 +140,11 @@ async function enablePolymarketDepositWallet(eoa: `0x${string}`): Promise<Enable
     };
   }
   const signer = getEvmSigner("polymarket");
-  const dw = deriveDepositWalletUUPS(eoa);
-  const relayer = new PolymarketRelayer({ creds });
   const rpc = new EvmRpc({ net: "polygon" });
+  // Resolve, don't assume: legacy owners have UUPS wallets, fresh owners get the
+  // factory's current (beacon) derivation — deploying at the wrong one strands funds.
+  const dw = await resolveDepositWallet(eoa, rpc);
+  const relayer = new PolymarketRelayer({ creds });
   const steps: string[] = [];
   const fundTarget = (process.env.STARLING_PM_FUND_USDC ?? "").trim();
 

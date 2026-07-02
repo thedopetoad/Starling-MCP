@@ -136,6 +136,12 @@ export class EvmRpc implements EvmRpcLike {
     return BigInt(await this.call<string>("eth_getBalance", [address, "latest"]));
   }
 
+  /** eth_getCode — "0x" for an EOA / never-deployed address. Feeds the deposit-
+   *  wallet resolver's is-it-actually-deployed probe. */
+  async getCode(address: string): Promise<string> {
+    return this.call<string>("eth_getCode", [address, "latest"]);
+  }
+
   /** EIP-1559 fee suggestion: base fee from the pending block + a priority tip,
    *  with a chain-aware floor (Polygon's well-known ~30 gwei min priority fee, or
    *  1 gwei elsewhere) and 2x base headroom for a few blocks of base-fee rise. */

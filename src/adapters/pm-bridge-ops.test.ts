@@ -21,7 +21,7 @@ interface Recorder {
 function backend(over: Partial<PmBridgeBackend> = {}): { be: PmBridgeBackend; calls: Recorder } {
   const calls: Recorder = { withdrawLookup: [], transfers: [] };
   const be: PmBridgeBackend = {
-    depositWallet: () => DW,
+    depositWallet: async () => DW,
     bridge: {
       async getDepositAddresses() { return { evm: "0xDEP", svm: "SOLDEP", tron: "T", btc: "b" }; },
       async getWithdrawAddress(args) { calls.withdrawLookup.push(args); return { evm: BRIDGE_EVM, svm: "s", tron: "t", btc: "b" }; },
@@ -80,7 +80,7 @@ test("unsupported destination chain is refused", async () => {
 });
 
 test("no signer loaded => refused, nothing transferred", async () => {
-  const { be, calls } = backend({ depositWallet: () => null });
+  const { be, calls } = backend({ depositWallet: async () => null });
   const r = await makePmBridgeOps(be).withdraw({ amount: "3", toChain: "polygon", recipient: RECIP_POLY });
   assert.equal(r.ok, false);
   assert.equal(calls.transfers.length, 0);

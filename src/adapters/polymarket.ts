@@ -56,7 +56,7 @@ import {
   SIGNATURE_TYPE_POLY_1271,
   type TickSize,
 } from "./polymarket-constants.js";
-import { deriveDepositWalletUUPS, signPoly1271Order } from "./polymarket-deposit-wallet.js";
+import { resolveDepositWallet, signPoly1271Order } from "./polymarket-deposit-wallet.js";
 import {
   fetchTickSize,
   fetchNegRisk,
@@ -269,19 +269,20 @@ export class PolymarketAdapter implements VenueAdapter {
    * amounts on the tick grid the SDK uses, and signs the EIP-712 digest with the
    * in-process Polygon key.
    */
-  private buildSignedOrder(args: {
+  private async buildSignedOrder(args: {
     market: ResolvedMarket;
     side: Side;
     amount: string;
     worstPrice: string;
-  }): Eip712OrderResult {
+  }): Promise<Eip712OrderResult> {
     const { market, side, amount, worstPrice } = args;
     const signer = getEvmSigner("polymarket");
     const eoa = signer.address as `0x${string}`;
-    // DW mode: maker == signer == the EOA's derived deposit wallet, sigType 3.
+    // DW mode: maker == signer == the EOA's RESOLVED deposit wallet (UUPS for
+    // legacy owners, beacon post-migration; cached after first resolve), sigType 3.
     // EOA mode (legacy): maker == signer == the bare EOA, sigType 0.
     const useDW = this.depositWallet;
-    const maker = useDW ? deriveDepositWalletUUPS(eoa) : eoa;
+    const maker = useDW ? await resolveDepositWallet(eoa) : eoa;
     const signatureType = useDW ? SIGNATURE_TYPE_POLY_1271 : SIGNATURE_TYPE_EOA;
 
     const price = priceCheck(worstPrice, market.tickSize);
@@ -387,7 +388,7 @@ export class PolymarketAdapter implements VenueAdapter {
    *  whichever actually holds them, or close/state never find the position. */
   private async readPosition(tokenId: string): Promise<PositionState | null> {
     const eoa = getEvmSigner("polymarket").address as `0x${string}`;
-    const maker = this.depositWallet ? deriveDepositWalletUUPS(eoa) : eoa;
+    const maker = this.depositWallet ? await resolveDepositWallet(eoa) : eoa;
     const rows = await fetchPositions(maker, { fetchImpl: this.fetchImpl });
     const row = rows.find((p) => p.asset === tokenId);
     if (!row) return null;

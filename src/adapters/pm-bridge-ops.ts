@@ -14,7 +14,7 @@ import type { Chain } from "./types.js";
 import type { PmBridgeOps, PmDepositInfo, PmWithdrawResult } from "../tools/index.js";
 import { PolymarketBridge, PM_SOLANA_CHAIN_ID, SOLANA_USDC_MINT, type BridgeAddresses } from "./polymarket-bridge.js";
 import { loadedAddresses, getEvmSigner } from "../signers/index.js";
-import { deriveDepositWalletUUPS } from "./polymarket-deposit-wallet.js";
+import { resolveDepositWallet } from "./polymarket-deposit-wallet.js";
 import { PolymarketRelayer, builderCredsFromEnv, buildTransferPusdCall, PUSD } from "./polymarket-relayer.js";
 import { EvmRpc } from "./evm-rpc.js";
 
@@ -32,8 +32,9 @@ const PM_WITHDRAW_DEST: Partial<Record<Chain, { chainId: string; token: string; 
 
 /** The seam makeRealPmBridge wires to live concretes; tests inject fakes. */
 export interface PmBridgeBackend {
-  /** Derived deposit-wallet address for the loaded EOA, or null if no signer. */
-  depositWallet(): string | null;
+  /** Resolved deposit-wallet address for the loaded EOA, or null if no signer.
+   *  Async because the live impl resolves the wallet's era (UUPS vs beacon) on-chain. */
+  depositWallet(): Promise<string | null>;
   bridge: Pick<PolymarketBridge, "getDepositAddresses" | "getWithdrawAddress">;
   /** DW pUSD balance (6-dp base units). */
   readDwPusd(dw: string): Promise<bigint>;
@@ -44,7 +45,7 @@ export interface PmBridgeBackend {
 export function makePmBridgeOps(b: PmBridgeBackend): PmBridgeOps {
   return {
     async depositAddresses(): Promise<PmDepositInfo> {
-      const dw = b.depositWallet();
+      const dw = await b.depositWallet();
       if (!dw) throw new Error("no polygon signer loaded — unlock a Polygon key first");
       const addresses = await b.bridge.getDepositAddresses(dw);
       return {
@@ -59,7 +60,7 @@ export function makePmBridgeOps(b: PmBridgeBackend): PmBridgeOps {
 
     async withdraw({ amount, toChain, recipient }): Promise<PmWithdrawResult> {
       const base = { deliveredToChain: toChain, recipient };
-      const dw = b.depositWallet();
+      const dw = await b.depositWallet();
       if (!dw) return { ...base, ok: false, blockers: ["no polygon signer loaded"], note: "Unlock a Polygon key before withdrawing." };
 
       let amountRaw: bigint;
@@ -117,9 +118,9 @@ export function makePmBridgeOps(b: PmBridgeBackend): PmBridgeOps {
 export function makeRealPmBridge(): PmBridgeOps {
   const rpc = new EvmRpc({ net: "polygon" });
   return makePmBridgeOps({
-    depositWallet() {
+    async depositWallet() {
       const eoa = loadedAddresses().polygon;
-      return eoa ? deriveDepositWalletUUPS(eoa as Hex) : null;
+      return eoa ? resolveDepositWallet(eoa as Hex, rpc) : null;
     },
     bridge: new PolymarketBridge(),
     async readDwPusd(dw: string) {
