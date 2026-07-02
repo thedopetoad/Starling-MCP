@@ -42,6 +42,20 @@ async function erc20Bal(rpc: EvmRpc, token: string, who: string): Promise<bigint
 const markOf = (p: DataApiPosition): number => p.curPrice ?? p.avgPrice ?? 0;
 const valueOf = (p: DataApiPosition): number => Math.abs(p.size) * markOf(p);
 
+/**
+ * Bug 2 guard: realized proceeds from selling a FRACTION of the book can never
+ * exceed that slice's MARKED value. The raw deposit-wallet pUSD delta measured
+ * across a close over-counts any non-close inflow that lands in the window (a
+ * concurrent deposit sweeping in, the loading-DW sweep, the LLM trader's fills) —
+ * which once inflated a 5.8% withdrawal's realized to ~$48 (true ~$3) and crashed
+ * NAV when it was cashed out. Cap the raw delta at the marked slice: honest sells
+ * (at/below the mark) stay under the cap and pay true realized; a polluted delta is
+ * clamped so we never cash out more than the redeemer's fair share.
+ */
+export function capRealizedProceeds(rawProceedsBase: bigint, markedSliceBase: bigint): bigint {
+  return rawProceedsBase > markedSliceBase ? markedSliceBase : rawProceedsBase;
+}
+
 interface Book {
   eoa: string;
   depositWallet: string;
@@ -162,6 +176,9 @@ export async function murmurClose(d: CommandDeps, args: Record<string, unknown>)
       message: `[dry-run] would close ${(fraction * 100).toFixed(3)}% of ${b.positions.length} position(s) (~$${est.toFixed(2)}) + idle slice $${fromBase(idleSlice).toFixed(2)}. ${ARM}` };
   }
 
+  // Marked value of the slice we're closing — the CAP for realized proceeds below.
+  const markedPositionSlice = toBase(b.positions.reduce((s, p) => s + valueOf(p) * fraction, 0));
+
   const p0 = b.idlePusd; // pUSD before any close
   const legs: Array<Record<string, unknown>> = [];
   const residual: string[] = [];
@@ -178,15 +195,31 @@ export async function murmurClose(d: CommandDeps, args: Record<string, unknown>)
     legs.push({ marketId: `pm:${p.asset}`, ok, note: r.note ?? r.error });
   }
 
-  // Realized = (pUSD that landed from the sells) + the redeemer's idle slice.
+  // Realized = (pUSD the sells actually returned) + the redeemer's idle slice.
+  //
+  // CRITICAL (Bug 2 fix): the raw balance delta p1−p0 OVER-COUNTS any pUSD that
+  // lands on the deposit wallet during the close window that isn't from THIS close —
+  // a concurrent deposit sweeping into the desk, the loading-DW sweep, or the LLM
+  // trader's own fills. A prior 5.8% withdrawal measured $48 realized this way (vs
+  // the true ~$3), and the follow-on cashout drained idle pUSD and crashed NAV. The
+  // realized value of a fraction of the book can NEVER exceed that slice's marked
+  // value, so cap it: honest sells (which fill at/below the mark after slippage) stay
+  // UNDER the cap and pay true realized; a polluted delta is clamped so we never cash
+  // out more than the redeemer's fair marked share. (Under-count from a concurrent
+  // BUY is pool-favorable and left as-is.)
   const p1 = await waitPusdSettle(b.rpc, b.depositWallet);
-  const positionProceeds = p1 > p0 ? p1 - p0 : 0n;
+  const rawProceeds = p1 > p0 ? p1 - p0 : 0n;
+  const positionProceeds = capRealizedProceeds(rawProceeds, markedPositionSlice);
+  const capped = rawProceeds > markedPositionSlice;
   const realized = positionProceeds + idleSlice;
   const okN = legs.filter((l) => l.ok).length;
   return {
     status: residual.length === 0 ? "ok" : "in_progress",
-    message: `closed ${okN}/${legs.length} leg(s); realized $${fromBase(realized).toFixed(2)} (sells $${fromBase(positionProceeds).toFixed(2)} + idle $${fromBase(idleSlice).toFixed(2)})${residual.length ? `; RESIDUAL (retry/redeem): ${residual.join(", ")}` : ""}`,
+    message: `closed ${okN}/${legs.length} leg(s); realized $${fromBase(realized).toFixed(2)} (sells $${fromBase(positionProceeds).toFixed(2)}${capped ? ` [CAPPED at marked; raw delta $${fromBase(rawProceeds).toFixed(2)} incl. non-close inflow]` : ""} + idle $${fromBase(idleSlice).toFixed(2)})${residual.length ? `; RESIDUAL (retry/redeem): ${residual.join(", ")}` : ""}`,
     realizedProceedsUsdc: realized.toString(),
+    markedPositionSliceUsdc: markedPositionSlice.toString(),
+    rawProceedsUsdc: rawProceeds.toString(),
+    capped,
     legs, residual,
   };
 }
