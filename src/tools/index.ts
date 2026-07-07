@@ -85,6 +85,7 @@ import { runTransfer, advanceBridge } from "./transfer.js";
 import { SolanaRpc, associatedTokenAddress } from "../adapters/solana-rpc.js";
 import { buildSolanaSweep } from "../adapters/solana-sweep.js";
 import { USDC_MINT as SOL_USDC_MINT } from "../adapters/jupiter.js";
+import { searchVerifiedTokens, scoutAsset } from "../adapters/scout.js";
 
 // ── result helpers ──────────────────────────────────────────────────────────
 // Matches the shape server.ts already returns: { content: [{type:"text", text}] }.
@@ -1116,6 +1117,39 @@ export const MONEY_TOOLS = [
         ...IDEMPOTENCY,
       },
       required: ["positionPubkey", "idempotencyKey"],
+    },
+  },
+  {
+    name: "jup_token_search",
+    description:
+      "Read-only, keyless: search Solana tokens by symbol/name via Jupiter and return VERIFIED " +
+      "matches only, most liquid first — symbol, mint, decimals, pool liquidity (USD), mcap, price. " +
+      "Use this to resolve a ticker to a tradeable mint instead of recalling mint addresses from memory.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        query: { ...STR, description: 'Ticker or name, e.g. "WBTC", "cbBTC", "JitoSOL".' },
+        limit: { ...NUM, description: "Max matches (default 5)." },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "venue_scout",
+    description:
+      "Read-only, keyless BEST-EXECUTION scout: given one asset (e.g. \"BTC\"), find every venue that " +
+      "can express it — Hyperliquid perp book + Jupiter spot on verified Solana mints — and rank by " +
+      "ALL-IN one-way cost at your size (venue fees + half bid/ask spread, or AMM impact which embeds " +
+      "pool fees), with a liquidity floor so thin books never win. Returns ranked candidates with " +
+      "instrument ids ready for hl_order / open_position, plus `best` and a human `reason`. " +
+      "(Polymarket trades event contracts, not assets, so it is never a candidate here.)",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        asset: { ...STR, description: 'Asset symbol, e.g. "BTC", "ETH", "SOL".' },
+        sizeUsd: { ...NUM, description: "Intended order size in USD (default 100) — sizes the impact quote and the liquidity floor." },
+      },
+      required: ["asset"],
     },
   },
 ];
@@ -2339,6 +2373,30 @@ export async function guardRetry(
   return { ok: true, record: rec };
 }
 
+// ── execution scout (read-only, keyless) ─────────────────────────────────────
+
+async function handleJupTokenSearch(a: Args): Promise<ToolText> {
+  const query = reqStr(a, "query");
+  const limit = optNum(a, "limit") ?? 5;
+  const hits = await searchVerifiedTokens(query, {}, Math.min(Math.max(1, limit), 10));
+  return ok({
+    ok: true,
+    query,
+    matches: hits,
+    note: hits.length
+      ? "verified mints only, most liquid first — trade via jup:<usdcMint>:<mint>"
+      : "no VERIFIED Solana token matches this query",
+  });
+}
+
+async function handleVenueScout(a: Args): Promise<ToolText> {
+  const asset = reqStr(a, "asset");
+  const sizeUsd = optNum(a, "sizeUsd") ?? 100;
+  if (!(sizeUsd > 0)) throw new ArgError('"sizeUsd" must be a positive number');
+  const result = await scoutAsset(asset, sizeUsd);
+  return ok({ ok: true, ...result });
+}
+
 // ── dispatcher ───────────────────────────────────────────────────────────────
 // server.ts calls this from its CallTool switch for any name in MONEY_TOOL_NAMES.
 
@@ -2348,6 +2406,10 @@ export async function handleMoneyTool(name: string, rawArgs: unknown, deps: Tool
     switch (name) {
       case "get_quote":
         return await handleGetQuote(deps, a);
+      case "jup_token_search":
+        return await handleJupTokenSearch(a);
+      case "venue_scout":
+        return await handleVenueScout(a);
       case "open_position":
         return await handleOpenPosition(deps, a);
       case "close_position":
