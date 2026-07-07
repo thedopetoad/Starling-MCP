@@ -85,7 +85,7 @@ import { runTransfer, advanceBridge } from "./transfer.js";
 import { SolanaRpc, associatedTokenAddress } from "../adapters/solana-rpc.js";
 import { buildSolanaSweep } from "../adapters/solana-sweep.js";
 import { USDC_MINT as SOL_USDC_MINT } from "../adapters/jupiter.js";
-import { searchVerifiedTokens, scoutAsset } from "../adapters/scout.js";
+import { searchVerifiedTokens, scoutAsset, searchPolymarketMarkets } from "../adapters/scout.js";
 
 // ── result helpers ──────────────────────────────────────────────────────────
 // Matches the shape server.ts already returns: { content: [{type:"text", text}] }.
@@ -1130,6 +1130,24 @@ export const MONEY_TOOLS = [
       properties: {
         query: { ...STR, description: 'Ticker or name, e.g. "WBTC", "cbBTC", "JitoSOL".' },
         limit: { ...NUM, description: "Max matches (default 5)." },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "pm_market_search",
+    description:
+      "Read-only, keyless: search Polymarket for ACTIVE, tradeable prediction markets matching free " +
+      "text — a team, person, event, election, ticker, anything. Returns each market's question, " +
+      "conditionId, YES/NO CLOB tokenIds, current outcome prices, and volume (most-liquid first; " +
+      "already-resolved books are filtered out). This is how a NON-crypto tweet (sports, politics, " +
+      "culture, a person) becomes a concrete tradeable market: search, pick the market + outcome the " +
+      "tweet implies, then buy that outcome's tokenId via open_position venue=polymarket.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        query: { ...STR, description: 'Free-text search, e.g. "Haaland", "Norway World Cup", "US election".' },
+        limit: { ...NUM, description: "Max markets (default 8)." },
       },
       required: ["query"],
     },
@@ -2389,6 +2407,20 @@ async function handleJupTokenSearch(a: Args): Promise<ToolText> {
   });
 }
 
+async function handlePmMarketSearch(a: Args): Promise<ToolText> {
+  const query = reqStr(a, "query");
+  const limit = optNum(a, "limit") ?? 8;
+  const markets = await searchPolymarketMarkets(query, {}, Math.min(Math.max(1, limit), 20));
+  return ok({
+    ok: true,
+    query,
+    markets,
+    note: markets.length
+      ? "active tradeable markets, most-liquid first — buy an outcome via open_position venue=polymarket marketId=pm:<tokenId>"
+      : "no active Polymarket market matches this query",
+  });
+}
+
 async function handleVenueScout(a: Args): Promise<ToolText> {
   const asset = reqStr(a, "asset");
   const sizeUsd = optNum(a, "sizeUsd") ?? 100;
@@ -2410,6 +2442,8 @@ export async function handleMoneyTool(name: string, rawArgs: unknown, deps: Tool
         return await handleJupTokenSearch(a);
       case "venue_scout":
         return await handleVenueScout(a);
+      case "pm_market_search":
+        return await handlePmMarketSearch(a);
       case "open_position":
         return await handleOpenPosition(deps, a);
       case "close_position":

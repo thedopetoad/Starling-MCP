@@ -91,6 +91,63 @@ export async function searchVerifiedTokens(query: string, opts: FetchOpts = {}, 
     .slice(0, limit);
 }
 
+// ── Polymarket market search (Gamma public-search, read-only, keyless) ───────
+const GAMMA = "https://gamma-api.polymarket.com";
+
+export interface PmMarketHit {
+  question: string;
+  eventTitle: string;
+  conditionId: string;
+  /** [YES tokenId, NO tokenId] — the CLOB tokens an order trades. */
+  yesTokenId: string | null;
+  noTokenId: string | null;
+  outcomes: string[];
+  /** Marketable prices per outcome (0..1). */
+  prices: number[];
+  volumeUsd: number;
+  liquidityUsd: number;
+  endDate: string | null;
+}
+
+/** Search Polymarket for ACTIVE, tradeable markets matching free text (a team,
+ *  person, event, ticker…). Skips resolved/degenerate books (price pinned to
+ *  0 or 1) and dust volume. Most-liquid first. This is how an event/sports/
+ *  political tweet becomes a concrete tradeable market. */
+export async function searchPolymarketMarkets(query: string, opts: FetchOpts = {}, limit = 8): Promise<PmMarketHit[]> {
+  const f = opts.fetchImpl ?? fetch;
+  const res = await f(`${GAMMA}/public-search?q=${encodeURIComponent(query)}&limit_per_type=12&events_status=active`);
+  if (!res.ok) throw new Error(`Gamma public-search HTTP ${res.status}`);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const j = (await res.json()) as any;
+  const out: PmMarketHit[] = [];
+  for (const ev of j?.events ?? []) {
+    if (ev?.closed === true) continue;
+    for (const m of ev?.markets ?? []) {
+      if (m?.active !== true || m?.closed === true) continue;
+      const parse = (v: unknown) => { try { return typeof v === "string" ? JSON.parse(v) : v; } catch { return []; } };
+      const tokens = parse(m.clobTokenIds) as string[];
+      const outcomes = (parse(m.outcomes) as string[]) ?? [];
+      const prices = ((parse(m.outcomePrices) as string[]) ?? []).map(Number);
+      // Skip already-resolved / untradeable books (a side pinned to 0 or 1).
+      if (prices.length && prices.every((p) => p <= 0.02 || p >= 0.98)) continue;
+      const vol = Number(m.volumeNum ?? m.volume ?? 0);
+      out.push({
+        question: String(m.question ?? ev.title ?? ""),
+        eventTitle: String(ev.title ?? ""),
+        conditionId: String(m.conditionId ?? ""),
+        yesTokenId: tokens?.[0] ?? null,
+        noTokenId: tokens?.[1] ?? null,
+        outcomes,
+        prices,
+        volumeUsd: vol,
+        liquidityUsd: Number(m.liquidity ?? m.liquidityNum ?? 0),
+        endDate: m.endDate ?? ev.endDate ?? null,
+      });
+    }
+  }
+  return out.sort((a, b) => b.volumeUsd - a.volumeUsd).slice(0, limit);
+}
+
 /** HL l2Book levels: [bids, asks], px/sz as strings. */
 interface HlBook {
   levels: [Array<{ px: string; sz: string }>, Array<{ px: string; sz: string }>];
