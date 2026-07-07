@@ -64,8 +64,17 @@ class HlVenue implements HlVenueOps {
 
   // ── reads ──────────────────────────────────────────────────────────────────
 
+  // AGENT-WALLET MODE: when STARLING_HL_ACCOUNT_ADDRESS is set, the loaded HL
+  // key is an approveAgent-ed AGENT wallet that SIGNS for a different MASTER
+  // account. Orders route to the master automatically (HL infers it from the
+  // agent signature); but INFO reads must query the MASTER address, not the
+  // agent (which holds no funds). Falls back to the signer address (plain EOA).
+  private queryAddress(): string {
+    return process.env.STARLING_HL_ACCOUNT_ADDRESS || getEvmSigner("hyperliquid").address;
+  }
+
   async account(): Promise<unknown> {
-    const user = getEvmSigner("hyperliquid").address;
+    const user = this.queryAddress();
     const [perp, spot, openOrders, staking, delegations] = await Promise.all([
       infoPost<unknown>({ type: "clearinghouseState", user }, { host: this.host }),
       infoPost<unknown>({ type: "spotClearinghouseState", user }, { host: this.host }),
@@ -86,6 +95,29 @@ class HlVenue implements HlVenueOps {
     const rawSize = a.amountKind === "collateral" ? Number(a.amount) / px : Number(a.amount);
     const sz = roundSz(rawSize, m.resolved.szDecimals);
     if (!(sz > 0)) return rejected(`size rounds to 0 at szDecimals=${m.resolved.szDecimals} (amount ${a.amount})`);
+    // PER-INSTRUMENT NOTIONAL CEILING (opt-in): when
+    // STARLING_HL_MAX_INSTRUMENT_NOTIONAL_USD > 0, a non-reduce-only PERP
+    // order is rejected if the account's existing |position notional| on this
+    // coin plus the order's notional would exceed the cap. This is a HARD,
+    // non-compounding ceiling on exposure per instrument — repeated orders can
+    // only fill up to it, never stack past it. Reduce-only orders (closes,
+    // SL/TP) are exempt. Sized at worstPrice (conservative for buys).
+    const instCap = Number(process.env.STARLING_HL_MAX_INSTRUMENT_NOTIONAL_USD || "0");
+    if (instCap > 0 && !m.resolved.isSpot && !(a.reduceOnly ?? false)) {
+      const st = await infoPost<{ assetPositions?: { position: { coin: string; positionValue: string } }[] }>(
+        { type: "clearinghouseState", user: this.queryAddress() },
+        { host: this.host },
+      );
+      const existing = Math.abs(
+        Number(st?.assetPositions?.find((p) => p.position.coin === m.resolved.coin)?.position.positionValue ?? 0),
+      );
+      const orderNotional = sz * px;
+      if (existing + orderNotional > instCap) {
+        return rejected(
+          `instrument notional cap: ${m.resolved.coin} already has $${existing.toFixed(2)} open; adding $${orderNotional.toFixed(2)} would exceed the $${instCap} per-instrument ceiling (STARLING_HL_MAX_INSTRUMENT_NOTIONAL_USD).`,
+        );
+      }
+    }
     const trigger = a.trigger
       ? { triggerPx: roundPxGrid(Number(a.trigger.triggerPx), m.resolved.szDecimals, m.resolved.isSpot), isMarket: a.trigger.isMarket, tpsl: a.trigger.tpsl }
       : undefined;
@@ -214,7 +246,7 @@ class HlVenue implements HlVenueOps {
   /** Open order ids on a single market (perp coin OR spot "@pairIndex"). */
   private async openOidsForMarket(m: ResolvedHl, pairIndex: number): Promise<number[]> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const oo = await infoPost<any[]>({ type: "frontendOpenOrders", user: getEvmSigner("hyperliquid").address }, { host: this.host });
+    const oo = await infoPost<any[]>({ type: "frontendOpenOrders", user: this.queryAddress() }, { host: this.host });
     const id = m.isSpot ? `@${pairIndex}` : m.coin;
     return (Array.isArray(oo) ? oo : [])
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
