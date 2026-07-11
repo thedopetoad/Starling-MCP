@@ -103,6 +103,7 @@ const hit = (over: Partial<SolanaTokenHit> = {}): SolanaTokenHit => ({
   mcapUsd: 1_000_000,
   usdPrice: 2.69,
   mintAuthority: null,
+  tags: ["verified"],
   ...over,
 });
 
@@ -198,6 +199,21 @@ test("guard 3: active mint authority rejected unless CG-registered (USDC/bridge 
     lookup: cg({ [`solana:${usdc.mint.toLowerCase()}`]: { status: "registered", id: "usd-coin", symbol: "USDC" } }),
   });
   assert.deepEqual(r2.kept.map((h) => h.mint), [usdc.mint]);
+});
+
+test("guard 3: xStocks issuer + curated tag survive offline; either alone does not", async () => {
+  const down = () => Promise.resolve({ status: "unavailable" } as CgLookup);
+  const issuer = "7pt9tkctJPK7PPNQJ77GKg8ZffSF6QxoMiCFYHxrtaCj";
+  const tslax = hit({ symbol: "TSLAx", mint: "XsDoVfqeBukxuZHWhdvWHBhgEHjGNst4MLodqsJHzoB1", mintAuthority: issuer, tags: ["verified", "xstocks", "rwa"] });
+  const r = await vetSolanaHits("TSLA", [tslax], { hlListed: false, lookup: down });
+  assert.deepEqual(r.kept.map((h) => h.symbol), ["TSLAx"]);
+  // spoofed authority without the curated tag → vetoed
+  const spoofAuth = hit({ symbol: "TSLAx", mint: "FakeXs1111111111111111111111111111111111111", mintAuthority: issuer, tags: ["verified"] });
+  // curated-looking tag with a different authority → vetoed
+  const wrongAuth = hit({ symbol: "TSLAx", mint: "FakeXs2222222222222222222222222222222222222", mintAuthority: "Dev111111111111111111111111111111111111111", tags: ["verified", "xstocks"] });
+  const r2 = await vetSolanaHits("TSLA", [spoofAuth, wrongAuth], { hlListed: false, lookup: down });
+  assert.equal(r2.kept.length, 0);
+  assert.equal(r2.vetoed.length, 2);
 });
 
 test("KNOWN_CANONICAL: wSOL survives guards 2+3 offline even when CoinGecko is down", async () => {

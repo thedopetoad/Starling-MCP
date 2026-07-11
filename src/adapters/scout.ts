@@ -30,6 +30,8 @@ export interface SolanaTokenHit {
   usdPrice: number | null;
   /** SPL mint authority — null/undefined when revoked. Active = dev can print. */
   mintAuthority: string | null;
+  /** Jupiter-curated tags (verified, xstocks, rwa, …). */
+  tags: string[];
 }
 
 export interface ScoutCandidate {
@@ -93,6 +95,7 @@ export async function searchVerifiedTokens(query: string, opts: FetchOpts = {}, 
       mcapUsd: Number(t.mcap ?? 0),
       usdPrice: t.usdPrice != null ? Number(t.usdPrice) : null,
       mintAuthority: t.mintAuthority != null ? String(t.mintAuthority) : null,
+      tags: Array.isArray(t.tags) ? t.tags.map(String) : [],
     }))
     .sort((a, b) => b.liquidityUsd - a.liquidityUsd)
     .slice(0, limit);
@@ -203,6 +206,17 @@ export const KNOWN_CANONICAL: Record<string, string> = {
   cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij: "BTC", // Coinbase cbBTC
 };
 
+/** xStocks issuer — every tokenized equity (TSLAx, AAPLx, …) keeps its mint
+ *  authority at this address (backed asset; issuer mints against custody).
+ *  Guard 3 accepts an active authority ONLY when it is this address AND
+ *  Jupiter's curated tag list says "xstocks" — authority alone is spoofable
+ *  (anyone can setAuthority to a pubkey they don't control), the tag alone is
+ *  Jupiter curation; together they're as strong as isVerified itself. */
+export const XSTOCKS_ISSUER = "7pt9tkctJPK7PPNQJ77GKg8ZffSF6QxoMiCFYHxrtaCj";
+export function isXStock(h: SolanaTokenHit): boolean {
+  return h.mintAuthority === XSTOCKS_ISSUER && (h.tags ?? []).includes("xstocks");
+}
+
 export interface VetContext extends FetchOpts {
   /** Explicit `<chain>:<address>` the signal/tweet names, if any. */
   contractRef?: string | null;
@@ -264,7 +278,7 @@ export async function vetSolanaHits(asset: string, hits: SolanaTokenHit[], ctx: 
   {
     const out: SolanaTokenHit[] = [];
     for (const h of pool) {
-      if (!h.mintAuthority || KNOWN_CANONICAL[h.mint]) { out.push(h); continue; }
+      if (!h.mintAuthority || KNOWN_CANONICAL[h.mint] || isXStock(h)) { out.push(h); continue; }
       const cg = await lookup("solana", h.mint);
       if (cg.status === "registered") out.push(h);
       else vetoed.push(`${tag(h)}: ACTIVE mint authority (${h.mintAuthority.slice(0, 6)}…) and not CoinGecko-registered (${cg.status}) — dev can print supply`);
