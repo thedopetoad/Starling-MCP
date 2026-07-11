@@ -1159,13 +1159,16 @@ export const MONEY_TOOLS = [
       "can express it — Hyperliquid perp book + Jupiter spot on verified Solana mints — and rank by " +
       "ALL-IN one-way cost at your size (venue fees + half bid/ask spread, or AMM impact which embeds " +
       "pool fees), with a liquidity floor so thin books never win. Returns ranked candidates with " +
-      "instrument ids ready for hl_order / open_position, plus `best` and a human `reason`. " +
+      "instrument ids ready for hl_order / open_position, plus `best`, a human `reason`, and any " +
+      "`vetoed` mints the wrong-coin identity guards rejected (ticker impersonators, active mint " +
+      "authority, unofficial cross-chain mirrors). " +
       "(Polymarket trades event contracts, not assets, so it is never a candidate here.)",
     inputSchema: {
       type: "object" as const,
       properties: {
         asset: { ...STR, description: 'Asset symbol, e.g. "BTC", "ETH", "SOL".' },
         sizeUsd: { ...NUM, description: "Intended order size in USD (default 100) — sizes the impact quote and the liquidity floor." },
+        contractRef: { ...STR, description: 'OPTIONAL "<chain>:<address>" the source explicitly names for this asset (e.g. "ethereum:0x232c…", "solana:EicW…"). Pins the asset\'s identity: only that mint, or CoinGecko-registered deployments of that exact coin, survive vetting.' },
       },
       required: ["asset"],
     },
@@ -2425,7 +2428,8 @@ async function handleVenueScout(a: Args): Promise<ToolText> {
   const asset = reqStr(a, "asset");
   const sizeUsd = optNum(a, "sizeUsd") ?? 100;
   if (!(sizeUsd > 0)) throw new ArgError('"sizeUsd" must be a positive number');
-  const result = await scoutAsset(asset, sizeUsd);
+  const contractRef = optStr(a, "contractRef") ?? null;
+  const result = await scoutAsset(asset, sizeUsd, { contractRef });
   return ok({ ok: true, ...result });
 }
 
