@@ -49,6 +49,8 @@ export interface ScoutCandidate {
   totalCostBps: number;
   /** HL: book depth within ±0.5% of mid. Jupiter: pool liquidity. */
   liquidityUsd: number;
+  /** Round-trip execution quality (entry + exit + depth penalty), lower wins. */
+  qualityScore?: number;
   note?: string;
 }
 
@@ -380,6 +382,89 @@ export async function hlPerpCandidate(coin: string, opts: FetchOpts = {}): Promi
   }
 }
 
+// ── HIP-3 builder-deployed perp dexs (oil, stock/commodity perps, …) ─────────
+// Builder dexs list markets the main dex doesn't (xyz:BRENTOIL, xyz:GOLD, …).
+// Catalogs come from {type:"meta", dex:"<name>"}; coins are "<dex>:<COIN>" and
+// l2Book takes the prefixed coin directly. Only USDC-collateral dexs
+// (collateralToken === 0) are candidates — trading a non-USDC dex would need a
+// spot buy of its collateral token first. Liquidity varies WILDLY (some books
+// are literally empty), so every candidate still goes through rankCandidates'
+// 20×-size floor — an empty book sinks as "thin liquidity", never wins.
+// NOTE: builder dexs may add a deployer fee on top of HL's base taker fee; we
+// rank with the base fee (spread/depth dominate the comparison anyway).
+const BUILDER_CACHE_TTL_MS = 10 * 60_000;
+
+export interface BuilderDex { name: string; markets: string[]; }
+
+let builderCache: { at: number; host: string; dexs: BuilderDex[] } = { at: 0, host: "", dexs: [] };
+
+/** USDC-collateral builder dexs with their market names, cached 10 min. */
+export async function usdcBuilderDexs(opts: FetchOpts = {}): Promise<BuilderDex[]> {
+  const host = opts.hlHost ?? defaultHlHost();
+  if (builderCache.host === host && Date.now() - builderCache.at < BUILDER_CACHE_TTL_MS) return builderCache.dexs;
+  const f = { host, fetchImpl: opts.fetchImpl };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const raw = await infoPost<any[]>({ type: "perpDexs" }, f);
+  const names = (Array.isArray(raw) ? raw : []).filter((d) => d && d.name).map((d) => String(d.name));
+  const dexs: BuilderDex[] = [];
+  await Promise.all(names.map(async (name) => {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const meta = await infoPost<any>({ type: "meta", dex: name }, f);
+      if (Number(meta?.collateralToken ?? 0) !== 0) return; // non-USDC collateral — unsupported
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      dexs.push({ name, markets: (meta?.universe ?? []).map((u: any) => String(u.name)) });
+    } catch {
+      /* skip a flaky dex this cycle; cache refresh retries in 10 min */
+    }
+  }));
+  builderCache = { at: Date.now(), host, dexs };
+  return dexs;
+}
+
+/** Ticker aliases for markets whose listed name differs from how a tweet says
+ *  it (CL is the WTI crude contract; BRENTOIL is brent). Deliberately tiny. */
+const TICKER_ALIASES: Record<string, string[]> = {
+  OIL: ["CL", "WTI", "USOIL", "BRENTOIL", "CRUDE"],
+  WTI: ["CL", "USOIL", "OIL"],
+  CRUDE: ["CL", "WTI", "USOIL", "BRENTOIL", "OIL"],
+  CRUDEOIL: ["CL", "WTI", "USOIL", "BRENTOIL", "OIL"],
+  BRENT: ["BRENTOIL"],
+  NATGAS: ["TTF"],
+  GAS: ["NATGAS", "TTF"],
+};
+
+/** Builder-dex perp candidates for `asset`: symbol/alias match across every
+ *  USDC-collateral dex, then price each match's book. Instrument is
+ *  "hl:<dex>:<COIN>" — resolveHlAsset handles the prefixed form end-to-end. */
+export async function builderPerpCandidates(asset: string, opts: FetchOpts = {}, maxBooks = 6): Promise<ScoutCandidate[]> {
+  const q = asset.toUpperCase().trim();
+  if (!q) return [];
+  const wanted = new Set([q, ...(TICKER_ALIASES[q] ?? [])]);
+  const dexs = await usdcBuilderDexs(opts).catch(() => [] as BuilderDex[]);
+  const matches: string[] = [];
+  for (const d of dexs) {
+    for (const name of d.markets) {
+      // EXACT match (or alias) only — substring matching put a LIT signal on
+      // xyz:LITE (2026-07-10, same bug class as CLANKER-for-CL). Markets whose
+      // listed name legitimately differs from the tweet's ticker belong in
+      // TICKER_ALIASES, not in a fuzzy match.
+      const bare = name.slice(name.indexOf(":") + 1).toUpperCase();
+      if (wanted.has(bare)) matches.push(name);
+    }
+  }
+  const host = opts.hlHost ?? defaultHlHost();
+  const cands = await Promise.all(matches.slice(0, maxBooks).map(async (name) => {
+    try {
+      const book = await infoPost<HlBook>({ type: "l2Book", coin: name }, { host, fetchImpl: opts.fetchImpl });
+      return hlCandidateFromBook(name, book); // instrument hl:<dex>:<COIN>
+    } catch {
+      return null;
+    }
+  }));
+  return cands.filter((c): c is ScoutCandidate => c !== null);
+}
+
 /** Jupiter spot candidate: quote USDC -> mint at sizeUsd; the shortfall of the
  *  received value vs the marked usdPrice IS the all-in cost (pool fees +
  *  impact; lite-api platform fee is zero). */
@@ -416,22 +501,37 @@ export async function jupCandidate(hit: SolanaTokenHit, sizeUsd: number, opts: F
   }
 }
 
-/** Pure ranking (exported for tests): lowest all-in cost wins among candidates
- *  whose liquidity can safely absorb the size; thin books sink to the bottom
- *  with a note rather than silently disappearing. */
+/** Pure ranking (exported for tests): best round-trip QUALITY wins among
+ *  candidates whose liquidity can safely absorb the size; thin books sink to
+ *  the bottom with a note rather than silently disappearing. */
 export function rankCandidates(cands: ScoutCandidate[], sizeUsd: number): Omit<ScoutResult, "asset" | "sizeUsd"> {
   const MIN_LIQ = Math.max(20 * sizeUsd, 1_000);
   const eligible = cands.filter((c) => c.liquidityUsd >= MIN_LIQ);
   const thin = cands
     .filter((c) => c.liquidityUsd < MIN_LIQ)
     .map((c) => ({ ...c, note: `${c.note ? c.note + "; " : ""}thin liquidity ($${Math.round(c.liquidityUsd).toLocaleString()} < $${Math.round(MIN_LIQ).toLocaleString()} floor)` }));
+  // QUALITY SCORE (owner call 2026-07-10): never rank on entry cost alone —
+  // a thin book can quote a deceptively tight small-size entry while being
+  // horrible to exit. Score = round-trip cost + a log-scaled depth penalty:
+  //   - totalCostBps already covers fees + ENTRY half-spread/impact
+  //   - add the EXIT leg: another half-spread (or impact again for AMMs)
+  //   - depth penalty: 20 bps per 10x below $1M liquidity (a $29k pool owes
+  //     ~+31 bps, a $1M+ pool owes 0) — deep books win unless the thin one
+  //     is drastically cheaper, which at that depth it never honestly is.
+  const LIQ_REF = 1_000_000;
+  const qualityScore = (c: ScoutCandidate) => {
+    const exitLeg = c.spreadBps != null ? c.spreadBps / 2 : (c.impactBps ?? 0);
+    const depthPenalty = 20 * Math.max(0, Math.log10(LIQ_REF / Math.max(c.liquidityUsd, 1)));
+    return c.totalCostBps + exitLeg + depthPenalty;
+  };
+  for (const c of cands) c.qualityScore = Math.round(qualityScore(c) * 10) / 10; // observability: shows up in scout output
   const byQuality = (a: ScoutCandidate, b: ScoutCandidate) =>
-    a.totalCostBps - b.totalCostBps || b.liquidityUsd - a.liquidityUsd;
+    qualityScore(a) - qualityScore(b) || b.liquidityUsd - a.liquidityUsd;
   eligible.sort(byQuality);
   thin.sort(byQuality);
   const best = eligible[0] ?? null;
   const reason = best
-    ? `${best.instrument} wins: ~${best.totalCostBps.toFixed(1)} bps all-in (fees ${best.feeBps} bps + ${
+    ? `${best.instrument} wins: quality ${best.qualityScore} (entry ~${best.totalCostBps.toFixed(1)} bps (fees ${best.feeBps} bps + ${
         best.spreadBps != null ? `half-spread ${(best.spreadBps / 2).toFixed(1)} bps` : `impact ${best.impactBps?.toFixed(1)} bps`
       }) with $${Math.round(best.liquidityUsd).toLocaleString()} liquidity at $${sizeUsd} size${
         eligible[1] ? ` — next best ${eligible[1].instrument} at ~${eligible[1].totalCostBps.toFixed(1)} bps` : ""
@@ -447,13 +547,39 @@ export interface ScoutOpts extends FetchOpts {
   contractRef?: string | null;
 }
 
-/** The full scout: search every venue, vet identity, price, rank. */
+/** The full scout: search every venue (HL main dex + HIP-3 builder dexs +
+ *  Jupiter verified mints), guard identity, price every candidate, rank. */
 export async function scoutAsset(asset: string, sizeUsd: number, opts: ScoutOpts = {}): Promise<ScoutResult> {
-  const [hl, solHitsAll] = await Promise.all([
+  const [hl, builders, solHitsAll] = await Promise.all([
     hlPerpCandidate(asset, opts),
+    builderPerpCandidates(asset, opts).catch(() => [] as ScoutCandidate[]),
     searchVerifiedTokens(asset, opts, 4).catch(() => [] as SolanaTokenHit[]),
   ]);
-  const { kept, vetoed } = await vetSolanaHits(asset, solHitsAll, {
+  // EXACT-TICKER GUARD (2026-07-10: desk bought "Hobbes" for a $ANSEM tweet).
+  // Jupiter's fuzzy search matches name/metadata too, and rankCandidates picks
+  // by EXECUTION QUALITY — so any richer-pool token that merely mentions the
+  // ticker could beat the ticker itself. Rules:
+  //   1. exact symbol match exists -> ONLY exact matches are candidates
+  //      (top-3 by liquidity; verified impostor dupes lose on liquidity, and
+  //      can never win on a cheaper pool).
+  //   2. no exact match -> symbol-SUBSTRING matches only (BTC -> cbBTC/WBTC/
+  //      xBTC wrapper proxies keep working). Metadata-only matches (query in
+  //      the name/description, e.g. "Ansem's cat") are NEVER eligible.
+  // Exact tier includes the xStocks convention (owner call 2026-07-10): an X
+  // cashtag like $TSLA maps to the tokenized equity "TSLAx" on Jupiter — and
+  // a verified meme literally named "TSLA" must NOT own the exact tier just
+  // by string equality. Both forms are exact candidates; the quality score
+  // (round-trip cost + depth) then picks the healthier market between them.
+  const q = String(asset).toUpperCase();
+  const isExact = (h: SolanaTokenHit) => {
+    const sym = h.symbol.toUpperCase();
+    return sym === q || sym === q + "X";
+  };
+  const exact = solHitsAll.filter(isExact);
+  const tickerHits = exact.length ? exact.slice(0, 3) : solHitsAll.filter((h) => h.symbol.toUpperCase().includes(q));
+  // IDENTITY GUARDS (2026-07-10: fake-LIT) — a ticker match still isn't an
+  // identity check; vet contract refs, cross-chain mirrors, mint authority.
+  const { kept, vetoed } = await vetSolanaHits(asset, tickerHits, {
     ...opts,
     contractRef: opts.contractRef ?? null,
     hlListed: hl !== null,
@@ -461,7 +587,7 @@ export async function scoutAsset(asset: string, sizeUsd: number, opts: ScoutOpts
   const jups = (await Promise.all(kept.map((h) => jupCandidate(h, sizeUsd, opts)))).filter(
     (c): c is ScoutCandidate => c !== null,
   );
-  const cands = [...(hl ? [hl] : []), ...jups];
+  const cands = [...(hl ? [hl] : []), ...builders, ...jups];
   const res: ScoutResult = { asset, sizeUsd, ...rankCandidates(cands, sizeUsd) };
   if (vetoed.length) {
     res.vetoed = vetoed;

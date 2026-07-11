@@ -78,6 +78,17 @@ test("rankCandidates: no candidates -> honest reason", () => {
   assert.match(r.reason, /no venue/);
 });
 
+test("rankCandidates: QUALITY SCORE — deep book beats a thin book's deceptively tight entry", () => {
+  // thin: 5 bps entry but only $30k depth → +~30 bps depth penalty + 5 bps exit
+  const thinCheap = cand({ instrument: "jup:usdc:thin", totalCostBps: 5, impactBps: 5, liquidityUsd: 30_000 });
+  // deep: 15 bps entry, $5M depth → no penalty
+  const deepDearer = cand({ instrument: "jup:usdc:deep", totalCostBps: 15, impactBps: 15, liquidityUsd: 5_000_000 });
+  const { best, ranked, reason } = rankCandidates([thinCheap, deepDearer], 100);
+  assert.equal(best?.instrument, "jup:usdc:deep");
+  assert.match(reason, /quality/);
+  assert.ok(ranked.every((c) => typeof c.qualityScore === "number"));
+});
+
 // ── wrong-coin guards (the blknoiz06 fake-LIT incident) ─────────────────────
 // The scenario these pin: a Jupiter-"verified" Solana mirror of a major
 // Ethereum token (arb-pegged price, active mint authority, not on CoinGecko)
